@@ -94,8 +94,8 @@ The Go instrumentation is limited to certain specific libraries.
 | [Gin](https://gin-gonic.com/)                       | ✅         |
 | [gRPC-Go](https://github.com/grpc/grpc-go)          | ✅         |
 | [Go x/net/http2](https://golang.org/x/net/http2)    | ✅         |
-| [Go-Redis v9](github.com/redis/go-redis)            | ✅         |
-| [Sarama Kafka](github.com/IBM/sarama)               | ✅         |
+| [Go-Redis v9](https://github.com/redis/go-redis)    | ✅         |
+| [Sarama Kafka](https://github.com/IBM/sarama)       | ✅         |
 | [kafka-Go](https://github.com/segmentio/kafka-go)   | ✅         |
 
 HTTPS instrumentation is limited to Go programs and libraries/languages using libssl3.
