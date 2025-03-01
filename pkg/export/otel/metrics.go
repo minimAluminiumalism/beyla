@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"slices"
@@ -15,19 +16,21 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	instrument "go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
-	"go.opentelemetry.io/otel/sdk/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.19.0"
+	"go.opentelemetry.io/otel/trace"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/export/otel/metric"
+	instrument "github.com/grafana/beyla/v2/pkg/export/otel/metric/api/metric"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 func mlog() *slog.Logger {
@@ -43,6 +46,7 @@ const (
 	SpanMetricsCalls   = "traces_spanmetrics_calls_total"
 	SpanMetricsSizes   = "traces_spanmetrics_size_total"
 	TracesTargetInfo   = "traces_target_info"
+	TracesHostInfo     = "traces_host_info"
 	ServiceGraphClient = "traces_service_graph_request_client"
 	ServiceGraphServer = "traces_service_graph_request_server"
 	ServiceGraphFailed = "traces_service_graph_request_failed_total"
@@ -54,15 +58,24 @@ const (
 	AggregationExplicit    = "explicit_bucket_histogram"
 	AggregationExponential = "base2_exponential_bucket_histogram"
 
-	FeatureNetwork     = "network"
-	FeatureApplication = "application"
-	FeatureSpan        = "application_span"
-	FeatureGraph       = "application_service_graph"
-	FeatureProcess     = "application_process"
+	FeatureNetwork          = "network"
+	FeatureNetworkInterZone = "network_inter_zone"
+	FeatureApplication      = "application"
+	FeatureSpan             = "application_span"
+	FeatureGraph            = "application_service_graph"
+	FeatureProcess          = "application_process"
+	FeatureEBPF             = "ebpf"
 )
+
+// GrafanaHostIDKey is the same attribute Key as HostIDKey, but used for
+// traces_target_info
+const GrafanaHostIDKey = attribute.Key("grafana.host.id")
 
 type MetricsConfig struct {
 	Interval time.Duration `yaml:"interval" env:"BEYLA_METRICS_INTERVAL"`
+	// OTELIntervalMS supports metric intervals as specified by the standard OTEL definition.
+	// BEYLA_METRICS_INTERVAL takes precedence over it.
+	OTELIntervalMS int `env:"OTEL_METRIC_EXPORT_INTERVAL"`
 
 	CommonEndpoint  string `yaml:"-" env:"OTEL_EXPORTER_OTLP_ENDPOINT"`
 	MetricsEndpoint string `yaml:"endpoint" env:"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"`
@@ -72,14 +85,6 @@ type MetricsConfig struct {
 
 	// InsecureSkipVerify is not standard, so we don't follow the same naming convention
 	InsecureSkipVerify bool `yaml:"insecure_skip_verify" env:"BEYLA_OTEL_INSECURE_SKIP_VERIFY"`
-
-	// ReportTarget specifies whether http.target should be submitted as a metric attribute. It is disabled by
-	// default to avoid cardinality explosion in paths with IDs. In that case, it is recommended to group these
-	// requests in the Routes node
-	// Deprecated. Going to be removed in Beyla 2.0. Use attributes.select instead
-	ReportTarget bool `yaml:"report_target" env:"BEYLA_METRICS_REPORT_TARGET"`
-	// Deprecated. Going to be removed in Beyla 2.0. Use attributes.select instead
-	ReportPeerInfo bool `yaml:"report_peer" env:"BEYLA_METRICS_REPORT_PEER"`
 
 	Buckets              Buckets `yaml:"buckets"`
 	HistogramAggregation string  `yaml:"histogram_aggregation" env:"OTEL_EXPORTER_OTLP_METRICS_DEFAULT_HISTOGRAM_AGGREGATION"`
@@ -101,6 +106,8 @@ type MetricsConfig struct {
 	// removed from the metrics set.
 	TTL time.Duration `yaml:"ttl" env:"BEYLA_OTEL_METRICS_TTL"`
 
+	AllowServiceGraphSelfReferences bool `yaml:"allow_service_graph_self_references" env:"BEYLA_OTEL_ALLOW_SERVICE_GRAPH_SELF_REFERENCES"`
+
 	// Grafana configuration needs to be explicitly set up before building the graph
 	Grafana *GrafanaOTLP `yaml:"-"`
 }
@@ -113,6 +120,13 @@ func (m *MetricsConfig) GetProtocol() Protocol {
 		return m.Protocol
 	}
 	return m.GuessProtocol()
+}
+
+func (m *MetricsConfig) GetInterval() time.Duration {
+	if m.Interval == 0 {
+		return time.Duration(m.OTELIntervalMS) * time.Millisecond
+	}
+	return m.Interval
 }
 
 func (m *MetricsConfig) GuessProtocol() Protocol {
@@ -129,6 +143,10 @@ func (m *MetricsConfig) GuessProtocol() Protocol {
 	// Otherwise we return default protocol according to the latest specification:
 	// https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md?plain=1#L53
 	return ProtocolHTTPProtobuf
+}
+
+func (m *MetricsConfig) OTLPMetricsEndpoint() (string, bool) {
+	return ResolveOTLPEndpoint(m.MetricsEndpoint, m.CommonEndpoint, m.Grafana)
 }
 
 // EndpointEnabled specifies that the OTEL metrics node is enabled if and only if
@@ -154,7 +172,15 @@ func (m *MetricsConfig) OTelMetricsEnabled() bool {
 }
 
 func (m *MetricsConfig) NetworkMetricsEnabled() bool {
+	return m.NetworkFlowBytesEnabled() || m.NetworkInterzoneMetricsEnabled()
+}
+
+func (m *MetricsConfig) NetworkFlowBytesEnabled() bool {
 	return slices.Contains(m.Features, FeatureNetwork)
+}
+
+func (m *MetricsConfig) NetworkInterzoneMetricsEnabled() bool {
+	return slices.Contains(m.Features, FeatureNetworkInterZone)
 }
 
 func (m *MetricsConfig) Enabled() bool {
@@ -168,8 +194,8 @@ type MetricsReporter struct {
 	cfg        *MetricsConfig
 	hostID     string
 	attributes *attributes.AttrSelector
-	exporter   metric.Exporter
-	reporters  ReporterPool[*svc.ID, *Metrics]
+	exporter   sdkmetric.Exporter
+	reporters  ReporterPool[*svc.Attrs, *Metrics]
 	is         instrumentations.InstrumentationSelection
 
 	// user-selected fields for each of the reported metrics
@@ -182,13 +208,15 @@ type MetricsReporter struct {
 	attrMessagingProcess      []attributes.Field[*request.Span, attribute.KeyValue]
 	attrHTTPRequestSize       []attributes.Field[*request.Span, attribute.KeyValue]
 	attrHTTPClientRequestSize []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUKernelCalls        []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUMemoryAllocations  []attributes.Field[*request.Span, attribute.KeyValue]
 }
 
 // Metrics is a set of metrics associated to a given OTEL MeterProvider.
 // There is a Metrics instance for each service/process instrumented by Beyla.
 type Metrics struct {
 	ctx      context.Context
-	service  *svc.ID
+	service  *svc.Attrs
 	provider *metric.MeterProvider
 
 	// IMPORTANT! Don't forget to clean each Expirer in cleanupAllMetricsInstances method
@@ -210,6 +238,8 @@ type Metrics struct {
 	serviceGraphFailed    *Expirer[*request.Span, instrument.Int64Counter, int64]
 	serviceGraphTotal     *Expirer[*request.Span, instrument.Int64Counter, int64]
 	tracesTargetInfo      instrument.Int64UpDownCounter
+	gpuKernelCallsTotal   *Expirer[*request.Span, instrument.Int64Counter, int64]
+	gpuMemoryAllocsTotal  *Expirer[*request.Span, instrument.Int64Counter, int64]
 }
 
 func ReportMetrics(
@@ -228,6 +258,16 @@ func ReportMetrics(
 		if err != nil {
 			return nil, fmt.Errorf("instantiating OTEL metrics reporter: %w", err)
 		}
+
+		if mr.cfg.SpanMetricsEnabled() || mr.cfg.ServiceGraphMetricsEnabled() {
+			hostMetrics := mr.newMetricsInstance(nil)
+			hostMeter := hostMetrics.provider.Meter(reporterName)
+			err := mr.setupHostInfoMeter(hostMeter)
+			if err != nil {
+				return nil, fmt.Errorf("setting up host metrics: %w", err)
+			}
+		}
+
 		return mr.reportMetrics, nil
 	}
 }
@@ -284,7 +324,14 @@ func newMetricsReporter(
 			request.SpanOTELGetters, mr.attributes.For(attributes.MessagingProcessDuration))
 	}
 
-	mr.reporters = NewReporterPool[*svc.ID, *Metrics](cfg.ReportersCacheLen, cfg.TTL, timeNow,
+	if is.GPUEnabled() {
+		mr.attrGPUKernelCalls = attributes.OpenTelemetryGetters(
+			request.SpanOTELGetters, mr.attributes.For(attributes.GPUKernelLaunchCalls))
+		mr.attrGPUMemoryAllocations = attributes.OpenTelemetryGetters(
+			request.SpanOTELGetters, mr.attributes.For(attributes.GPUMemoryAllocations))
+	}
+
+	mr.reporters = NewReporterPool[*svc.Attrs, *Metrics](cfg.ReportersCacheLen, cfg.TTL, timeNow,
 		func(id svc.UID, v *expirable[*Metrics]) {
 			if mr.cfg.SpanMetricsEnabled() {
 				attrOpt := instrument.WithAttributeSet(mr.metricResourceAttributes(v.value.service))
@@ -452,6 +499,22 @@ func (mr *MetricsReporter) setupOtelMeters(m *Metrics, meter instrument.Meter) e
 			m.ctx, msgProcessDuration, mr.attrMessagingProcess, timeNow, mr.cfg.TTL)
 	}
 
+	if mr.is.GPUEnabled() {
+		gpuKernelCallsTotal, err := meter.Int64Counter(attributes.GPUKernelLaunchCalls.OTEL)
+		if err != nil {
+			return fmt.Errorf("creating gpu kernel calls total: %w", err)
+		}
+		m.gpuKernelCallsTotal = NewExpirer[*request.Span, instrument.Int64Counter, int64](
+			m.ctx, gpuKernelCallsTotal, mr.attrGPUKernelCalls, timeNow, mr.cfg.TTL)
+
+		gpuMemoryAllocationsTotal, err := meter.Int64Counter(attributes.GPUMemoryAllocations.OTEL, instrument.WithUnit("By"))
+		if err != nil {
+			return fmt.Errorf("creating gpu memory allocations total: %w", err)
+		}
+		m.gpuMemoryAllocsTotal = NewExpirer[*request.Span, instrument.Int64Counter, int64](
+			m.ctx, gpuMemoryAllocationsTotal, mr.attrGPUMemoryAllocations, timeNow, mr.cfg.TTL)
+	}
+
 	return nil
 }
 
@@ -489,6 +552,17 @@ func (mr *MetricsReporter) setupSpanMeters(m *Metrics, meter instrument.Meter) e
 	if err != nil {
 		return fmt.Errorf("creating span metric traces target info: %w", err)
 	}
+
+	return nil
+}
+
+func (mr *MetricsReporter) setupHostInfoMeter(meter instrument.Meter) error {
+	tracesHostInfo, err := meter.Int64Gauge(TracesHostInfo)
+	if err != nil {
+		return fmt.Errorf("creating span metric traces host info: %w", err)
+	}
+	attrOpt := instrument.WithAttributeSet(mr.metricHostAttributes())
+	tracesHostInfo.Record(mr.ctx, 1, attrOpt)
 
 	return nil
 }
@@ -540,10 +614,14 @@ func (mr *MetricsReporter) setupGraphMeters(m *Metrics, meter instrument.Meter) 
 	return nil
 }
 
-func (mr *MetricsReporter) newMetricSet(service *svc.ID) (*Metrics, error) {
-	mlog := mlog().With("service", service)
+func (mr *MetricsReporter) newMetricsInstance(service *svc.Attrs) Metrics {
+	mlog := mlog()
+	var resourceAttributes []attribute.KeyValue
+	if service != nil {
+		mlog = mlog.With("service", service)
+		resourceAttributes = append(getAppResourceAttrs(mr.hostID, service), ResourceAttrsFromEnv(service)...)
+	}
 	mlog.Debug("creating new Metrics reporter")
-	resourceAttributes := append(getAppResourceAttrs(mr.hostID, service), ResourceAttrsFromEnv()...)
 	resources := resource.NewWithAttributes(semconv.SchemaURL, resourceAttributes...)
 
 	opts := []metric.Option{
@@ -556,13 +634,18 @@ func (mr *MetricsReporter) newMetricSet(service *svc.ID) (*Metrics, error) {
 	opts = append(opts, mr.spanMetricOptions(mlog)...)
 	opts = append(opts, mr.graphMetricOptions(mlog)...)
 
-	m := Metrics{
+	return Metrics{
 		ctx:     mr.ctx,
 		service: service,
 		provider: metric.NewMeterProvider(
 			opts...,
 		),
 	}
+}
+
+func (mr *MetricsReporter) newMetricSet(service *svc.Attrs) (*Metrics, error) {
+	m := mr.newMetricsInstance(service)
+
 	// time units for HTTP and GRPC durations are in seconds, according to the OTEL specification:
 	// https://github.com/open-telemetry/opentelemetry-specification/tree/main/specification/metrics/semantic_conventions
 	// TODO: set ExplicitBucketBoundaries here and in prometheus from the previous specification
@@ -610,10 +693,9 @@ func isExponentialAggregation(mc *MetricsConfig, mlog *slog.Logger) bool {
 	return false
 }
 
-// TODO: restore as private
-func InstantiateMetricsExporter(ctx context.Context, cfg *MetricsConfig, log *slog.Logger) (metric.Exporter, error) {
+func InstantiateMetricsExporter(ctx context.Context, cfg *MetricsConfig, log *slog.Logger) (sdkmetric.Exporter, error) {
 	var err error
-	var exporter metric.Exporter
+	var exporter sdkmetric.Exporter
 	switch proto := cfg.GetProtocol(); proto {
 	case ProtocolHTTPJSON, ProtocolHTTPProtobuf, "": // zero value defaults to HTTP for backwards-compatibility
 		log.Debug("instantiating HTTP MetricsReporter", "protocol", proto)
@@ -632,7 +714,7 @@ func InstantiateMetricsExporter(ctx context.Context, cfg *MetricsConfig, log *sl
 	return exporter, nil
 }
 
-func httpMetricsExporter(ctx context.Context, cfg *MetricsConfig) (metric.Exporter, error) {
+func httpMetricsExporter(ctx context.Context, cfg *MetricsConfig) (sdkmetric.Exporter, error) {
 	opts, err := getHTTPMetricEndpointOptions(cfg)
 	if err != nil {
 		return nil, err
@@ -644,7 +726,7 @@ func httpMetricsExporter(ctx context.Context, cfg *MetricsConfig) (metric.Export
 	return mexp, nil
 }
 
-func grpcMetricsExporter(ctx context.Context, cfg *MetricsConfig) (metric.Exporter, error) {
+func grpcMetricsExporter(ctx context.Context, cfg *MetricsConfig) (sdkmetric.Exporter, error) {
 	opts, err := getGRPCMetricEndpointOptions(cfg)
 	if err != nil {
 		return nil, err
@@ -664,7 +746,7 @@ func (mr *MetricsReporter) close() {
 
 // instrumentMetricsExporter checks whether the context is configured to report internal metrics and,
 // in this case, wraps the passed metrics exporter inside an instrumented exporter
-func instrumentMetricsExporter(internalMetrics imetrics.Reporter, in metric.Exporter) metric.Exporter {
+func instrumentMetricsExporter(internalMetrics imetrics.Reporter, in sdkmetric.Exporter) sdkmetric.Exporter {
 	// avoid wrapping the instrumented exporter if we don't have
 	// internal instrumentation (NoopReporter)
 	if _, ok := internalMetrics.(imetrics.NoopReporter); ok || internalMetrics == nil {
@@ -685,7 +767,7 @@ func otelHistogramConfig(metricName string, buckets []float64, useExponentialHis
 			},
 			metric.Stream{
 				Name: metricName,
-				Aggregation: metric.AggregationBase2ExponentialHistogram{
+				Aggregation: sdkmetric.AggregationBase2ExponentialHistogram{
 					MaxScale: 20,
 					MaxSize:  160,
 				},
@@ -698,18 +780,18 @@ func otelHistogramConfig(metricName string, buckets []float64, useExponentialHis
 		},
 		metric.Stream{
 			Name: metricName,
-			Aggregation: metric.AggregationExplicitBucketHistogram{
+			Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
 				Boundaries: buckets,
 			},
 		})
 
 }
 
-func (mr *MetricsReporter) metricResourceAttributes(service *svc.ID) attribute.Set {
+func (mr *MetricsReporter) metricResourceAttributes(service *svc.Attrs) attribute.Set {
 	attrs := []attribute.KeyValue{
-		request.ServiceMetric(service.Name),
-		semconv.ServiceInstanceID(service.Instance),
-		semconv.ServiceNamespace(service.Namespace),
+		request.ServiceMetric(service.UID.Name),
+		semconv.ServiceInstanceID(service.UID.Instance),
+		semconv.ServiceNamespace(service.UID.Namespace),
 		semconv.TelemetrySDKLanguageKey.String(service.SDKLanguage.String()),
 		semconv.TelemetrySDKNameKey.String("beyla"),
 		request.SourceMetric("beyla"),
@@ -717,6 +799,14 @@ func (mr *MetricsReporter) metricResourceAttributes(service *svc.ID) attribute.S
 	}
 	for k, v := range service.Metadata {
 		attrs = append(attrs, k.OTEL().String(v))
+	}
+
+	return attribute.NewSet(attrs...)
+}
+
+func (mr *MetricsReporter) metricHostAttributes() attribute.Set {
+	attrs := []attribute.KeyValue{
+		GrafanaHostIDKey.String(mr.hostID),
 	}
 
 	return attribute.NewSet(attrs...)
@@ -756,82 +846,100 @@ func (mr *MetricsReporter) serviceGraphAttributes() []attributes.Field[*request.
 		})
 }
 
+func otelSpanAccepted(span *request.Span, mr *MetricsReporter) bool {
+	return mr.cfg.OTelMetricsEnabled() && !span.Service.ExportsOTelMetrics()
+}
+
 // nolint:cyclop
 func (r *Metrics) record(span *request.Span, mr *MetricsReporter) {
 	t := span.Timings()
 	duration := t.End.Sub(t.RequestStart).Seconds()
 
-	if mr.cfg.OTelMetricsEnabled() {
+	ctx := trace.ContextWithSpanContext(r.ctx, trace.SpanContext{}.WithTraceID(span.TraceID).WithSpanID(span.SpanID).WithTraceFlags(trace.TraceFlags(span.Flags)))
+
+	if otelSpanAccepted(span, mr) {
 		switch span.Type {
 		case request.EventTypeHTTP:
 			if mr.is.HTTPEnabled() {
 				// TODO: for more accuracy, there must be a way to set the metric time from the actual span end time
 				httpDuration, attrs := r.httpDuration.ForRecord(span)
-				httpDuration.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+				httpDuration.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 
 				httpRequestSize, attrs := r.httpRequestSize.ForRecord(span)
-				httpRequestSize.Record(r.ctx, float64(span.RequestLength()), instrument.WithAttributeSet(attrs))
+				httpRequestSize.Record(ctx, float64(span.RequestLength()), instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeGRPC:
 			if mr.is.GRPCEnabled() {
 				grpcDuration, attrs := r.grpcDuration.ForRecord(span)
-				grpcDuration.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+				grpcDuration.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeGRPCClient:
 			if mr.is.GRPCEnabled() {
 				grpcClientDuration, attrs := r.grpcClientDuration.ForRecord(span)
-				grpcClientDuration.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+				grpcClientDuration.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeHTTPClient:
 			if mr.is.HTTPEnabled() {
 				httpClientDuration, attrs := r.httpClientDuration.ForRecord(span)
-				httpClientDuration.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+				httpClientDuration.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 				httpClientRequestSize, attrs := r.httpClientRequestSize.ForRecord(span)
-				httpClientRequestSize.Record(r.ctx, float64(span.RequestLength()), instrument.WithAttributeSet(attrs))
+				httpClientRequestSize.Record(ctx, float64(span.RequestLength()), instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeRedisServer, request.EventTypeRedisClient, request.EventTypeSQLClient:
 			if mr.is.DBEnabled() {
 				dbClientDuration, attrs := r.dbClientDuration.ForRecord(span)
-				dbClientDuration.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+				dbClientDuration.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeKafkaClient, request.EventTypeKafkaServer:
 			if mr.is.MQEnabled() {
 				switch span.Method {
 				case request.MessagingPublish:
 					msgPublishDuration, attrs := r.msgPublishDuration.ForRecord(span)
-					msgPublishDuration.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+					msgPublishDuration.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 				case request.MessagingProcess:
 					msgProcessDuration, attrs := r.msgProcessDuration.ForRecord(span)
-					msgProcessDuration.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+					msgProcessDuration.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 				}
+			}
+		case request.EventTypeGPUKernelLaunch:
+			if mr.is.GPUEnabled() {
+				gcalls, attrs := r.gpuKernelCallsTotal.ForRecord(span)
+				gcalls.Add(ctx, 1, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUMalloc:
+			if mr.is.GPUEnabled() {
+				gmem, attrs := r.gpuMemoryAllocsTotal.ForRecord(span)
+				gmem.Add(ctx, span.ContentLength, instrument.WithAttributeSet(attrs))
 			}
 		}
 	}
 
 	if mr.cfg.SpanMetricsEnabled() {
 		sml, attrs := r.spanMetricsLatency.ForRecord(span)
-		sml.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
+		sml.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 
 		smct, attrs := r.spanMetricsCallsTotal.ForRecord(span)
-		smct.Add(r.ctx, 1, instrument.WithAttributeSet(attrs))
+		smct.Add(ctx, 1, instrument.WithAttributeSet(attrs))
 
 		smst, attrs := r.spanMetricsSizeTotal.ForRecord(span)
-		smst.Add(r.ctx, float64(span.RequestLength()), instrument.WithAttributeSet(attrs))
+		smst.Add(ctx, float64(span.RequestLength()), instrument.WithAttributeSet(attrs))
 	}
 
 	if mr.cfg.ServiceGraphMetricsEnabled() {
-		if span.IsClientSpan() {
-			sgc, attrs := r.serviceGraphClient.ForRecord(span)
-			sgc.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
-		} else {
-			sgs, attrs := r.serviceGraphServer.ForRecord(span)
-			sgs.Record(r.ctx, duration, instrument.WithAttributeSet(attrs))
-		}
-		sgt, attrs := r.serviceGraphTotal.ForRecord(span)
-		sgt.Add(r.ctx, 1, instrument.WithAttributeSet(attrs))
-		if request.SpanStatusCode(span) == codes.Error {
-			sgf, attrs := r.serviceGraphFailed.ForRecord(span)
-			sgf.Add(r.ctx, 1, instrument.WithAttributeSet(attrs))
+		if !span.IsSelfReferenceSpan() || mr.cfg.AllowServiceGraphSelfReferences {
+			if span.IsClientSpan() {
+				sgc, attrs := r.serviceGraphClient.ForRecord(span)
+				sgc.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			} else {
+				sgs, attrs := r.serviceGraphServer.ForRecord(span)
+				sgs.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			}
+			sgt, attrs := r.serviceGraphTotal.ForRecord(span)
+			sgt.Add(ctx, 1, instrument.WithAttributeSet(attrs))
+			if request.SpanStatusCode(span) == codes.Error {
+				sgf, attrs := r.serviceGraphFailed.ForRecord(span)
+				sgf.Add(ctx, 1, instrument.WithAttributeSet(attrs))
+			}
 		}
 	}
 }
@@ -840,15 +948,17 @@ func (mr *MetricsReporter) reportMetrics(input <-chan []request.Span) {
 	for spans := range input {
 		for i := range spans {
 			s := &spans[i]
-
+			if s.InternalSignal() {
+				continue
+			}
 			// If we are ignoring this span because of route patterns, don't do anything
 			if s.IgnoreMetrics() {
 				continue
 			}
-			reporter, err := mr.reporters.For(&s.ServiceID)
+			reporter, err := mr.reporters.For(&s.Service)
 			if err != nil {
 				mlog().Error("unexpected error creating OTEL resource. Ignoring metric",
-					err, "service", s.ServiceID)
+					"error", err, "service", s.Service)
 				continue
 			}
 			reporter.record(s, mr)
@@ -858,7 +968,7 @@ func (mr *MetricsReporter) reportMetrics(input <-chan []request.Span) {
 }
 
 func getHTTPMetricEndpointOptions(cfg *MetricsConfig) (otlpOptions, error) {
-	opts := otlpOptions{}
+	opts := otlpOptions{Headers: map[string]string{}}
 	log := mlog().With("transport", "http")
 	murl, isCommon, err := parseMetricsEndpoint(cfg)
 	if err != nil {
@@ -891,12 +1001,14 @@ func getHTTPMetricEndpointOptions(cfg *MetricsConfig) (otlpOptions, error) {
 	}
 
 	cfg.Grafana.setupOptions(&opts)
+	maps.Copy(opts.Headers, HeadersFromEnv(envHeaders))
+	maps.Copy(opts.Headers, HeadersFromEnv(envMetricsHeaders))
 
 	return opts, nil
 }
 
 func getGRPCMetricEndpointOptions(cfg *MetricsConfig) (otlpOptions, error) {
-	opts := otlpOptions{}
+	opts := otlpOptions{Headers: map[string]string{}}
 	log := mlog().With("transport", "grpc")
 	murl, _, err := parseMetricsEndpoint(cfg)
 	if err != nil {
@@ -915,6 +1027,11 @@ func getGRPCMetricEndpointOptions(cfg *MetricsConfig) (otlpOptions, error) {
 		log.Debug("Setting InsecureSkipVerify")
 		opts.SkipTLSVerify = true
 	}
+
+	cfg.Grafana.setupOptions(&opts)
+	maps.Copy(opts.Headers, HeadersFromEnv(envHeaders))
+	maps.Copy(opts.Headers, HeadersFromEnv(envMetricsHeaders))
+
 	return opts, nil
 }
 
@@ -925,15 +1042,7 @@ func getGRPCMetricEndpointOptions(cfg *MetricsConfig) (otlpOptions, error) {
 // If, by some reason, Grafana changes its OTLP Gateway URL in a distant future, you can still point to the
 // correct URL with the OTLP_EXPORTER_... variables.
 func parseMetricsEndpoint(cfg *MetricsConfig) (*url.URL, bool, error) {
-	isCommon := false
-	endpoint := cfg.MetricsEndpoint
-	if endpoint == "" {
-		isCommon = true
-		endpoint = cfg.CommonEndpoint
-		if endpoint == "" && cfg.Grafana != nil && cfg.Grafana.CloudZone != "" {
-			endpoint = cfg.Grafana.Endpoint()
-		}
-	}
+	endpoint, isCommon := cfg.OTLPMetricsEndpoint()
 
 	murl, err := url.Parse(endpoint)
 	if err != nil {
@@ -975,6 +1084,18 @@ func cleanupMetrics(ctx context.Context, m *Expirer[*request.Span, instrument.Fl
 	}
 }
 
+func cleanupCounterMetrics(ctx context.Context, m *Expirer[*request.Span, instrument.Int64Counter, int64]) {
+	if m != nil {
+		m.RemoveAllMetrics(ctx)
+	}
+}
+
+func cleanupFloatCounterMetrics(ctx context.Context, m *Expirer[*request.Span, instrument.Float64Counter, float64]) {
+	if m != nil {
+		m.RemoveAllMetrics(ctx)
+	}
+}
+
 func (r *Metrics) cleanupAllMetricsInstances() {
 	cleanupMetrics(r.ctx, r.httpDuration)
 	cleanupMetrics(r.ctx, r.httpClientDuration)
@@ -985,4 +1106,12 @@ func (r *Metrics) cleanupAllMetricsInstances() {
 	cleanupMetrics(r.ctx, r.msgProcessDuration)
 	cleanupMetrics(r.ctx, r.httpRequestSize)
 	cleanupMetrics(r.ctx, r.httpClientRequestSize)
+	cleanupMetrics(r.ctx, r.spanMetricsLatency)
+	cleanupCounterMetrics(r.ctx, r.spanMetricsCallsTotal)
+	cleanupFloatCounterMetrics(r.ctx, r.spanMetricsSizeTotal)
+	cleanupMetrics(r.ctx, r.serviceGraphClient)
+	cleanupMetrics(r.ctx, r.serviceGraphServer)
+	cleanupCounterMetrics(r.ctx, r.serviceGraphFailed)
+	cleanupCounterMetrics(r.ctx, r.serviceGraphTotal)
+	cleanupCounterMetrics(r.ctx, r.gpuKernelCallsTotal)
 }

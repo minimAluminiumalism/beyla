@@ -26,6 +26,11 @@ var (
 		Prom:    "beyla_network_flow_bytes_total",
 		OTEL:    "beyla.network.flow.bytes",
 	}
+	BeylaNetworkInterZone = Name{
+		Section: "beyla.network.inter.zone",
+		Prom:    "beyla_network_inter_zone_bytes_total",
+		OTEL:    "beyla.network.inter.zone.bytes",
+	}
 	HTTPServerRequestSize = Name{
 		Section: "http.server.request.body.size",
 		Prom:    "http_server_request_body_size_bytes",
@@ -100,6 +105,16 @@ var (
 		Section: "messaging.process.duration",
 		Prom:    "messaging_process_duration_seconds",
 		OTEL:    "messaging.process.duration",
+	}
+	GPUKernelLaunchCalls = Name{
+		Section: "gpu.kernel.launch.calls",
+		Prom:    "gpu_kernel_launch_calls_total",
+		OTEL:    "gpu.kernel.launch.calls",
+	}
+	GPUMemoryAllocations = Name{
+		Section: "gpu.memory.allocations",
+		Prom:    "gpu_memory_allocations_bytes_total",
+		OTEL:    "gpu.memory.allocations",
 	}
 )
 

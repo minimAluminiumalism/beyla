@@ -10,12 +10,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/export/otel"
-	"github.com/grafana/beyla/pkg/internal/connector"
-	"github.com/grafana/beyla/pkg/internal/infraolly/process"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/internal/connector"
+	"github.com/grafana/beyla/v2/pkg/internal/infraolly/process"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 func TestProcPrometheusEndpoint_AggregatedMetrics(t *testing.T) {
@@ -28,7 +28,7 @@ func TestProcPrometheusEndpoint_AggregatedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	promURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", openPort)
 
-	// GIVEN a Prometheus Metrics Exporter whose process CPU metrics do not consider the process_cpu_state
+	// GIVEN a Prometheus Metrics Exporter whose process CPU metrics do not consider the cpu_mode
 	attribs := attributes.InclusionLists{
 		Include: []string{"process_command"},
 	}
@@ -54,13 +54,13 @@ func TestProcPrometheusEndpoint_AggregatedMetrics(t *testing.T) {
 
 	// WHEN it receives process metrics
 	metrics <- []*process.Status{
-		{ID: process.ID{Service: &svc.ID{}, Command: "foo"},
+		{ID: process.ID{Service: &svc.Attrs{}, Command: "foo"},
 			CPUUtilisationWait: 3, CPUUtilisationSystem: 2, CPUUtilisationUser: 1,
 			CPUTimeUserDelta: 30, CPUTimeWaitDelta: 20, CPUTimeSystemDelta: 10,
 			IOReadBytesDelta: 123, IOWriteBytesDelta: 456,
 			NetRcvBytesDelta: 12, NetTxBytesDelta: 34,
 		},
-		{ID: process.ID{Service: &svc.ID{}, Command: "bar"},
+		{ID: process.ID{Service: &svc.Attrs{}, Command: "bar"},
 			CPUUtilisationWait: 31, CPUUtilisationSystem: 21, CPUUtilisationUser: 11,
 			CPUTimeUserDelta: 301, CPUTimeWaitDelta: 201, CPUTimeSystemDelta: 101,
 			IOReadBytesDelta: 321, IOWriteBytesDelta: 654,
@@ -83,7 +83,7 @@ func TestProcPrometheusEndpoint_AggregatedMetrics(t *testing.T) {
 
 	// AND WHEN new metrics are received
 	metrics <- []*process.Status{
-		{ID: process.ID{Service: &svc.ID{}, Command: "foo"},
+		{ID: process.ID{Service: &svc.Attrs{}, Command: "foo"},
 			CPUUtilisationWait: 4, CPUUtilisationSystem: 1, CPUUtilisationUser: 2,
 			CPUTimeUserDelta: 3, CPUTimeWaitDelta: 2, CPUTimeSystemDelta: 1,
 			IOReadBytesDelta: 31, IOWriteBytesDelta: 10,
@@ -115,9 +115,9 @@ func TestProcPrometheusEndpoint_DisaggregatedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	promURL := fmt.Sprintf("http://127.0.0.1:%d/metrics", openPort)
 
-	// GIVEN a Prometheus Metrics Exporter whose process CPU metrics consider the process_cpu_state
+	// GIVEN a Prometheus Metrics Exporter whose process CPU metrics consider the cpu_mode
 	attribs := attributes.InclusionLists{
-		Include: []string{"process_command", "process_cpu_state", "disk_io_direction", "network_io_direction"},
+		Include: []string{"process_command", "cpu_mode", "disk_io_direction", "network_io_direction"},
 	}
 	exporter, err := ProcPrometheusEndpoint(
 		ctx, &global.ContextInfo{Prometheus: &connector.PrometheusManager{}},
@@ -141,7 +141,7 @@ func TestProcPrometheusEndpoint_DisaggregatedMetrics(t *testing.T) {
 
 	// WHEN it receives process metrics
 	metrics <- []*process.Status{
-		{ID: process.ID{Service: &svc.ID{}, Command: "foo"},
+		{ID: process.ID{Service: &svc.Attrs{}, Command: "foo"},
 			CPUUtilisationWait: 3, CPUUtilisationSystem: 2, CPUUtilisationUser: 1,
 			CPUTimeUserDelta: 30, CPUTimeWaitDelta: 20, CPUTimeSystemDelta: 10,
 			IOReadBytesDelta: 123, IOWriteBytesDelta: 456,
@@ -152,12 +152,12 @@ func TestProcPrometheusEndpoint_DisaggregatedMetrics(t *testing.T) {
 	// THEN the metrics are exported aggregated by system/user/wait times
 	test.Eventually(t, timeout, func(t require.TestingT) {
 		exported := getMetrics(t, promURL)
-		assert.Contains(t, exported, `process_cpu_utilization_ratio{process_command="foo",process_cpu_state="user"} 1`)
-		assert.Contains(t, exported, `process_cpu_utilization_ratio{process_command="foo",process_cpu_state="system"} 2`)
-		assert.Contains(t, exported, `process_cpu_utilization_ratio{process_command="foo",process_cpu_state="wait"} 3`)
-		assert.Contains(t, exported, `process_cpu_time_seconds_total{process_command="foo",process_cpu_state="user"} 30`)
-		assert.Contains(t, exported, `process_cpu_time_seconds_total{process_command="foo",process_cpu_state="system"} 10`)
-		assert.Contains(t, exported, `process_cpu_time_seconds_total{process_command="foo",process_cpu_state="wait"} 20`)
+		assert.Contains(t, exported, `process_cpu_utilization_ratio{cpu_mode="user",process_command="foo"} 1`)
+		assert.Contains(t, exported, `process_cpu_utilization_ratio{cpu_mode="system",process_command="foo"} 2`)
+		assert.Contains(t, exported, `process_cpu_utilization_ratio{cpu_mode="wait",process_command="foo"} 3`)
+		assert.Contains(t, exported, `process_cpu_time_seconds_total{cpu_mode="user",process_command="foo"} 30`)
+		assert.Contains(t, exported, `process_cpu_time_seconds_total{cpu_mode="system",process_command="foo"} 10`)
+		assert.Contains(t, exported, `process_cpu_time_seconds_total{cpu_mode="wait",process_command="foo"} 20`)
 		assert.Contains(t, exported, `process_disk_io_bytes_total{disk_io_direction="read",process_command="foo"} 123`)
 		assert.Contains(t, exported, `process_disk_io_bytes_total{disk_io_direction="write",process_command="foo"} 456`)
 		assert.Contains(t, exported, `process_network_io_bytes_total{network_io_direction="transmit",process_command="foo"} 3`)
@@ -166,7 +166,7 @@ func TestProcPrometheusEndpoint_DisaggregatedMetrics(t *testing.T) {
 
 	// AND WHEN new metrics are received
 	metrics <- []*process.Status{
-		{ID: process.ID{Service: &svc.ID{}, Command: "foo"},
+		{ID: process.ID{Service: &svc.Attrs{}, Command: "foo"},
 			CPUUtilisationWait: 4, CPUUtilisationSystem: 1, CPUUtilisationUser: 2,
 			CPUTimeUserDelta: 3, CPUTimeWaitDelta: 2, CPUTimeSystemDelta: 1,
 			IOReadBytesDelta: 3, IOWriteBytesDelta: 2,
@@ -177,12 +177,12 @@ func TestProcPrometheusEndpoint_DisaggregatedMetrics(t *testing.T) {
 	// THEN the counter is updated by adding values and the gauges change their values
 	test.Eventually(t, timeout, func(t require.TestingT) {
 		exported := getMetrics(t, promURL)
-		assert.Contains(t, exported, `process_cpu_utilization_ratio{process_command="foo",process_cpu_state="user"} 2`)
-		assert.Contains(t, exported, `process_cpu_utilization_ratio{process_command="foo",process_cpu_state="system"} 1`)
-		assert.Contains(t, exported, `process_cpu_utilization_ratio{process_command="foo",process_cpu_state="wait"} 4`)
-		assert.Contains(t, exported, `process_cpu_time_seconds_total{process_command="foo",process_cpu_state="user"} 33`)
-		assert.Contains(t, exported, `process_cpu_time_seconds_total{process_command="foo",process_cpu_state="system"} 11`)
-		assert.Contains(t, exported, `process_cpu_time_seconds_total{process_command="foo",process_cpu_state="wait"} 22`)
+		assert.Contains(t, exported, `process_cpu_utilization_ratio{cpu_mode="user",process_command="foo"} 2`)
+		assert.Contains(t, exported, `process_cpu_utilization_ratio{cpu_mode="system",process_command="foo"} 1`)
+		assert.Contains(t, exported, `process_cpu_utilization_ratio{cpu_mode="wait",process_command="foo"} 4`)
+		assert.Contains(t, exported, `process_cpu_time_seconds_total{cpu_mode="user",process_command="foo"} 33`)
+		assert.Contains(t, exported, `process_cpu_time_seconds_total{cpu_mode="system",process_command="foo"} 11`)
+		assert.Contains(t, exported, `process_cpu_time_seconds_total{cpu_mode="wait",process_command="foo"} 22`)
 		assert.Contains(t, exported, `process_disk_io_bytes_total{disk_io_direction="read",process_command="foo"} 126`)
 		assert.Contains(t, exported, `process_disk_io_bytes_total{disk_io_direction="write",process_command="foo"} 458`)
 		assert.Contains(t, exported, `process_network_io_bytes_total{network_io_direction="transmit",process_command="foo"} 33`)

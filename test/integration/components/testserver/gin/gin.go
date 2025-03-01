@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/grafana/beyla/test/integration/components/testserver/arg"
+	"github.com/grafana/beyla/v2/test/integration/components/testserver/arg"
 )
 
 func Setup(port int) {
@@ -38,5 +38,5 @@ func Setup(port int) {
 	address := fmt.Sprintf(":%d", port)
 	log.Info("starting HTTP server", "address", address)
 	err := r.Run(address)
-	log.Error("HTTP server has unexpectedly stopped", err)
+	log.Error("HTTP server has unexpectedly stopped", "error", err)
 }

@@ -6,21 +6,25 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/grafana/beyla/pkg/beyla"
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/internal/appolly"
-	"github.com/grafana/beyla/pkg/internal/connector"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/kube"
-	"github.com/grafana/beyla/pkg/internal/netolly/agent"
-	"github.com/grafana/beyla/pkg/internal/netolly/flow"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/beyla"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/internal/appolly"
+	"github.com/grafana/beyla/v2/pkg/internal/connector"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/kube"
+	"github.com/grafana/beyla/v2/pkg/internal/netolly/agent"
+	"github.com/grafana/beyla/v2/pkg/internal/netolly/flow"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
 )
 
 // RunBeyla in the foreground process. This is a blocking function and won't exit
 // until both the AppO11y and NetO11y components end
 func RunBeyla(ctx context.Context, cfg *beyla.Config) error {
-	ctxInfo := buildCommonContextInfo(ctx, cfg)
+	ctxInfo, err := buildCommonContextInfo(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("can't build common context info: %w", err)
+	}
 
 	wg := sync.WaitGroup{}
 	app := cfg.Enabled(beyla.FeatureAppO11y)
@@ -32,11 +36,14 @@ func RunBeyla(ctx context.Context, cfg *beyla.Config) error {
 		wg.Add(1)
 	}
 
+	// of one of both nodes fail, the other should stop
+	ctx, cancel := context.WithCancel(ctx)
 	errs := make(chan error, 2)
 	if app {
 		go func() {
 			defer wg.Done()
 			if err := setupAppO11y(ctx, ctxInfo, cfg); err != nil {
+				cancel()
 				errs <- err
 			}
 		}()
@@ -45,11 +52,13 @@ func RunBeyla(ctx context.Context, cfg *beyla.Config) error {
 		go func() {
 			defer wg.Done()
 			if err := setupNetO11y(ctx, ctxInfo, cfg); err != nil {
+				cancel()
 				errs <- err
 			}
 		}()
 	}
 	wg.Wait()
+	cancel()
 	select {
 	case err := <-errs:
 		return err
@@ -60,16 +69,22 @@ func RunBeyla(ctx context.Context, cfg *beyla.Config) error {
 
 func setupAppO11y(ctx context.Context, ctxInfo *global.ContextInfo, config *beyla.Config) error {
 	slog.Info("starting Beyla in Application Observability mode")
-	// TODO: when we split Beyla in two processes with different permissions, this code can be split:
-	// in two parts:
-	// 1st process (privileged) - Invoke FindTarget, which also mounts the BPF maps
-	// 2nd executable (unprivileged) - Invoke ReadAndForward, receiving the BPF map mountpoint as argument
 
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	instr := appolly.New(ctx, ctxInfo, config)
-	if err := instr.FindAndInstrument(); err != nil {
+	if finderDone, err := instr.FindAndInstrument(); err != nil {
+		slog.Debug("can't find  target process", "error", err)
 		return fmt.Errorf("can't find target process: %w", err)
+	} else {
+		defer func() {
+			// before exiting, waits for all the resources to be freed
+			<-finderDone
+		}()
 	}
 	if err := instr.ReadAndForward(); err != nil {
+		cancel()
+		slog.Debug("can't start read and forwarding", "error", err)
 		return fmt.Errorf("can't start read and forwarding: %w", err)
 	}
 	return nil
@@ -83,9 +98,11 @@ func setupNetO11y(ctx context.Context, ctxInfo *global.ContextInfo, cfg *beyla.C
 	slog.Info("starting Beyla in Network metrics mode")
 	flowsAgent, err := agent.FlowsAgent(ctxInfo, cfg)
 	if err != nil {
+		slog.Debug("can't start network metrics capture", "error", err)
 		return fmt.Errorf("can't start network metrics capture: %w", err)
 	}
 	if err := flowsAgent.Run(ctx); err != nil {
+		slog.Debug("can't start network metrics capture", "error", err)
 		return fmt.Errorf("can't start network metrics capture: %w", err)
 	}
 	return nil
@@ -103,19 +120,56 @@ func mustSkip(cfg *beyla.Config) string {
 // from the user-provided configuration
 func buildCommonContextInfo(
 	ctx context.Context, config *beyla.Config,
-) *global.ContextInfo {
+) (*global.ContextInfo, error) {
+
+	// merging deprecated resource labels definition for backwards compatibility
+	resourceLabels := config.Attributes.Kubernetes.ResourceLabels
+	if resourceLabels == nil {
+		resourceLabels = map[string][]string{}
+	}
+	showDeprecation := sync.OnceFunc(func() {
+		slog.Warn("The meta_source_labels (BEYLA_KUBE_META_SOURCE_LABEL_* environment variables) is deprecated." +
+			" Check the documentation for more information about replacing it by the resource_labels kubernetes" +
+			" YAML property")
+	})
+	if svc := config.Attributes.Kubernetes.MetaSourceLabels.ServiceName; svc != "" {
+		resourceLabels["service.name"] = append([]string{svc}, resourceLabels["service.name"]...)
+		showDeprecation()
+	}
+	if ns := config.Attributes.Kubernetes.MetaSourceLabels.ServiceNamespace; ns != "" {
+		resourceLabels["service.namespace"] = append([]string{ns}, resourceLabels["service.namespace"]...)
+		showDeprecation()
+	}
+
 	promMgr := &connector.PrometheusManager{}
 	ctxInfo := &global.ContextInfo{
 		Prometheus: promMgr,
-		K8sInformer: kube.NewMetadataProvider(
-			config.Attributes.Kubernetes.Enable,
-			config.Attributes.Kubernetes.DisableInformers,
-			config.Attributes.Kubernetes.KubeconfigPath,
-			config.Attributes.Kubernetes.InformersSyncTimeout,
-		),
+		K8sInformer: kube.NewMetadataProvider(kube.MetadataConfig{
+			Enable:            config.Attributes.Kubernetes.Enable,
+			KubeConfigPath:    config.Attributes.Kubernetes.KubeconfigPath,
+			SyncTimeout:       config.Attributes.Kubernetes.InformersSyncTimeout,
+			ResyncPeriod:      config.Attributes.Kubernetes.InformersResyncPeriod,
+			DisabledInformers: config.Attributes.Kubernetes.DisableInformers,
+			MetaCacheAddr:     config.Attributes.Kubernetes.MetaCacheAddress,
+			ResourceLabels:    resourceLabels,
+			RestrictLocalNode: config.Attributes.Kubernetes.MetaRestrictLocalNode,
+		}),
+	}
+	if config.Attributes.HostID.Override == "" {
+		ctxInfo.FetchHostID(ctx, config.Attributes.HostID.FetchTimeout)
+	} else {
+		ctxInfo.HostID = config.Attributes.HostID.Override
 	}
 	switch {
-	case config.InternalMetrics.Prometheus.Port != 0:
+	case config.InternalMetrics.Exporter == imetrics.InternalMetricsExporterOTEL:
+		var err error
+		config.Metrics.Grafana = &config.Grafana.OTLP
+		slog.Debug("reporting internal metrics as OpenTelemetry")
+		ctxInfo.Metrics, err = otel.NewInternalMetricsReporter(ctx, ctxInfo, &config.Metrics)
+		if err != nil {
+			return nil, fmt.Errorf("can't start OpenTelemetry metrics: %w", err)
+		}
+	case config.InternalMetrics.Exporter == imetrics.InternalMetricsExporterPrometheus || config.InternalMetrics.Prometheus.Port != 0:
 		slog.Debug("reporting internal metrics as Prometheus")
 		ctxInfo.Metrics = imetrics.NewPrometheusReporter(&config.InternalMetrics.Prometheus, promMgr, nil)
 		// Prometheus manager also has its own internal metrics, so we need to pass the imetrics reporter
@@ -131,13 +185,7 @@ func buildCommonContextInfo(
 
 	attributeGroups(config, ctxInfo)
 
-	if config.Attributes.HostID.Override == "" {
-		ctxInfo.FetchHostID(ctx, config.Attributes.HostID.FetchTimeout)
-	} else {
-		ctxInfo.HostID = config.Attributes.HostID.Override
-	}
-
-	return ctxInfo
+	return ctxInfo, nil
 }
 
 // attributeGroups specifies, based in the provided configuration, which groups of attributes
@@ -148,12 +196,6 @@ func attributeGroups(config *beyla.Config, ctxInfo *global.ContextInfo) {
 	}
 	if config.Routes != nil {
 		ctxInfo.MetricAttributeGroups.Add(attributes.GroupHTTPRoutes)
-	}
-	if config.Metrics.ReportPeerInfo || config.Prometheus.ReportPeerInfo {
-		ctxInfo.MetricAttributeGroups.Add(attributes.GroupPeerInfo)
-	}
-	if config.Metrics.ReportTarget || config.Prometheus.ReportTarget {
-		ctxInfo.MetricAttributeGroups.Add(attributes.GroupTarget)
 	}
 	if config.NetworkFlows.Deduper == flow.DeduperNone {
 		ctxInfo.MetricAttributeGroups.Add(attributes.GroupNetIfaceDirection)

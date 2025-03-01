@@ -19,7 +19,10 @@ import (
 	"go.opentelemetry.io/collector/config/configretry"
 	"go.opentelemetry.io/collector/config/configtelemetry"
 	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/exporter"
+	"go.opentelemetry.io/collector/exporter/exporterbatcher"
+	"go.opentelemetry.io/collector/exporter/exporterhelper"
 	"go.opentelemetry.io/collector/exporter/otlpexporter"
 	"go.opentelemetry.io/collector/exporter/otlphttpexporter"
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -36,13 +39,13 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/zap"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 func tlog() *slog.Logger {
@@ -75,7 +78,7 @@ type TracesConfig struct {
 	BatchTimeout       time.Duration `yaml:"batch_timeout" env:"BEYLA_OTLP_TRACES_BATCH_TIMEOUT"`
 	ExportTimeout      time.Duration `yaml:"export_timeout" env:"BEYLA_OTLP_TRACES_EXPORT_TIMEOUT"`
 
-	// Configuration optiosn for BackOffConfig of the traces exporter.
+	// Configuration options for BackOffConfig of the traces exporter.
 	// See https://github.com/open-telemetry/opentelemetry-collector/blob/main/config/configretry/backoff.go
 	// BackOffInitialInterval the time to wait after the first failure before retrying.
 	BackOffInitialInterval time.Duration `yaml:"backoff_initial_interval" env:"BEYLA_BACKOFF_INITIAL_INTERVAL"`
@@ -101,7 +104,7 @@ func (m *TracesConfig) Enabled() bool { //nolint:gocritic
 	return m.CommonEndpoint != "" || m.TracesEndpoint != "" || m.Grafana.TracesEnabled()
 }
 
-func (m *TracesConfig) getProtocol() Protocol {
+func (m *TracesConfig) GetProtocol() Protocol {
 	if m.TracesProtocol != "" {
 		return m.TracesProtocol
 	}
@@ -109,6 +112,10 @@ func (m *TracesConfig) getProtocol() Protocol {
 		return m.Protocol
 	}
 	return m.guessProtocol()
+}
+
+func (m *TracesConfig) OTLPTracesEndpoint() (string, bool) {
+	return ResolveOTLPEndpoint(m.TracesEndpoint, m.CommonEndpoint, m.Grafana)
 }
 
 func (m *TracesConfig) guessProtocol() Protocol {
@@ -127,27 +134,29 @@ func (m *TracesConfig) guessProtocol() Protocol {
 	return ProtocolHTTPProtobuf
 }
 
-func makeTracesReceiver(ctx context.Context, cfg TracesConfig, ctxInfo *global.ContextInfo, userAttribSelection attributes.Selection) *tracesOTELReceiver {
+func makeTracesReceiver(ctx context.Context, cfg TracesConfig, spanMetricsEnabled bool, ctxInfo *global.ContextInfo, userAttribSelection attributes.Selection) *tracesOTELReceiver {
 	return &tracesOTELReceiver{
-		ctx:        ctx,
-		cfg:        cfg,
-		ctxInfo:    ctxInfo,
-		attributes: userAttribSelection,
-		is:         instrumentations.NewInstrumentationSelection(cfg.Instrumentations),
+		ctx:                ctx,
+		cfg:                cfg,
+		ctxInfo:            ctxInfo,
+		attributes:         userAttribSelection,
+		is:                 instrumentations.NewInstrumentationSelection(cfg.Instrumentations),
+		spanMetricsEnabled: spanMetricsEnabled,
 	}
 }
 
 // TracesReceiver creates a terminal node that consumes request.Spans and sends OpenTelemetry metrics to the configured consumers.
-func TracesReceiver(ctx context.Context, cfg TracesConfig, ctxInfo *global.ContextInfo, userAttribSelection attributes.Selection) pipe.FinalProvider[[]request.Span] {
-	return makeTracesReceiver(ctx, cfg, ctxInfo, userAttribSelection).provideLoop
+func TracesReceiver(ctx context.Context, cfg TracesConfig, spanMetricsEnabled bool, ctxInfo *global.ContextInfo, userAttribSelection attributes.Selection) pipe.FinalProvider[[]request.Span] {
+	return makeTracesReceiver(ctx, cfg, spanMetricsEnabled, ctxInfo, userAttribSelection).provideLoop
 }
 
 type tracesOTELReceiver struct {
-	ctx        context.Context
-	cfg        TracesConfig
-	ctxInfo    *global.ContextInfo
-	attributes attributes.Selection
-	is         instrumentations.InstrumentationSelection
+	ctx                context.Context
+	cfg                TracesConfig
+	ctxInfo            *global.ContextInfo
+	attributes         attributes.Selection
+	is                 instrumentations.InstrumentationSelection
+	spanMetricsEnabled bool
 }
 
 func GetUserSelectedAttributes(attrs attributes.Selection) (map[attr.Name]struct{}, error) {
@@ -163,6 +172,55 @@ func GetUserSelectedAttributes(attrs attributes.Selection) (map[attr.Name]struct
 	}
 
 	return traceAttrs, err
+}
+
+func (tr *tracesOTELReceiver) getConstantAttributes() (map[attr.Name]struct{}, error) {
+	traceAttrs, err := GetUserSelectedAttributes(tr.attributes)
+	if err != nil {
+		return nil, err
+	}
+
+	if tr.spanMetricsEnabled {
+		traceAttrs[attr.SkipSpanMetrics] = struct{}{}
+	}
+	return traceAttrs, nil
+}
+
+func (tr *tracesOTELReceiver) spanDiscarded(span *request.Span) bool {
+	return span.IgnoreTraces() || span.Service.ExportsOTelTraces() || !tr.acceptSpan(span)
+}
+
+func (tr *tracesOTELReceiver) processSpans(exp exporter.Traces, spans []request.Span, traceAttrs map[attr.Name]struct{}, sampler trace.Sampler) {
+	for i := range spans {
+		span := &spans[i]
+		if span.InternalSignal() {
+			continue
+		}
+		if tr.spanDiscarded(span) {
+			continue
+		}
+
+		finalAttrs := traceAttributes(span, traceAttrs)
+
+		sr := sampler.ShouldSample(trace.SamplingParameters{
+			ParentContext: tr.ctx,
+			Name:          span.TraceName(),
+			TraceID:       span.TraceID,
+			Kind:          spanKind(span),
+			Attributes:    finalAttrs,
+		})
+
+		if sr.Decision == trace.Drop {
+			continue
+		}
+
+		envResourceAttrs := ResourceAttrsFromEnv(&span.Service)
+		traces := GenerateTracesWithAttributes(span, tr.ctxInfo.HostID, finalAttrs, envResourceAttrs)
+		err := exp.ConsumeTraces(tr.ctx, traces)
+		if err != nil {
+			slog.Error("error sending trace to consumer", "error", err)
+		}
+	}
 }
 
 func (tr *tracesOTELReceiver) provideLoop() (pipe.FinalFunc[[]request.Span], error) {
@@ -188,32 +246,27 @@ func (tr *tracesOTELReceiver) provideLoop() (pipe.FinalFunc[[]request.Span], err
 			return
 		}
 
-		traceAttrs, err := GetUserSelectedAttributes(tr.attributes)
+		traceAttrs, err := tr.getConstantAttributes()
 		if err != nil {
 			slog.Error("error selecting user trace attributes", "error", err)
 			return
 		}
 
-		envResourceAttrs := ResourceAttrsFromEnv()
+		if tr.spanMetricsEnabled {
+			traceAttrs[attr.SkipSpanMetrics] = struct{}{}
+		}
+
+		sampler := tr.cfg.Sampler.Implementation()
 
 		for spans := range in {
-			for i := range spans {
-				span := &spans[i]
-				if span.IgnoreTraces() || !tr.acceptSpan(span) {
-					continue
-				}
-				traces := GenerateTraces(span, tr.ctxInfo.HostID, traceAttrs, envResourceAttrs)
-				err := exp.ConsumeTraces(tr.ctx, traces)
-				if err != nil {
-					slog.Error("error sending trace to consumer", "error", err)
-				}
-			}
+			tr.processSpans(exp, spans, traceAttrs, sampler)
 		}
 	}, nil
 }
 
+// nolint:cyclop
 func getTracesExporter(ctx context.Context, cfg TracesConfig, ctxInfo *global.ContextInfo) (exporter.Traces, error) {
-	switch proto := cfg.getProtocol(); proto {
+	switch proto := cfg.GetProtocol(); proto {
 	case ProtocolHTTPJSON, ProtocolHTTPProtobuf, "": // zero value defaults to HTTP for backwards-compatibility
 		slog.Debug("instantiating HTTP TracesReporter", "protocol", proto)
 		var t trace.SpanExporter
@@ -225,12 +278,20 @@ func getTracesExporter(ctx context.Context, cfg TracesConfig, ctxInfo *global.Co
 			return nil, err
 		}
 		if t, err = httpTracer(ctx, opts); err != nil {
-			slog.Error("can't instantiate OTEL HTTP traces exporter", err)
+			slog.Error("can't instantiate OTEL HTTP traces exporter", "error", err)
 			return nil, err
 		}
 		factory := otlphttpexporter.NewFactory()
 		config := factory.CreateDefaultConfig().(*otlphttpexporter.Config)
-		config.QueueConfig.Enabled = false
+		// Experimental API for batching
+		// See: https://github.com/open-telemetry/opentelemetry-collector/issues/8122
+		batchCfg := exporterbatcher.NewDefaultConfig()
+		if cfg.MaxQueueSize > 0 {
+			batchCfg.MaxSizeConfig.MaxSizeItems = cfg.MaxExportBatchSize
+			if cfg.BatchTimeout > 0 {
+				batchCfg.FlushTimeout = cfg.BatchTimeout
+			}
+		}
 		config.RetryConfig = getRetrySettings(cfg)
 		config.ClientConfig = confighttp.ClientConfig{
 			Endpoint: opts.Scheme + "://" + opts.Endpoint + opts.BaseURLPath,
@@ -238,11 +299,24 @@ func getTracesExporter(ctx context.Context, cfg TracesConfig, ctxInfo *global.Co
 				Insecure:           opts.Insecure,
 				InsecureSkipVerify: cfg.InsecureSkipVerify,
 			},
-			Headers: convertHeaders(opts.HTTPHeaders),
+			Headers: convertHeaders(opts.Headers),
 		}
 		slog.Debug("getTracesExporter: confighttp.ClientConfig created", "endpoint", config.ClientConfig.Endpoint)
-		set := getTraceSettings(ctxInfo, cfg, t)
-		return factory.CreateTracesExporter(ctx, set, config)
+		set := getTraceSettings(ctxInfo, t)
+		exporter, err := factory.CreateTraces(ctx, set, config)
+		if err != nil {
+			slog.Error("can't create OTLP HTTP traces exporter", "error", err)
+			return nil, err
+		}
+		// TODO: remove this once the batcher helper is added to otlphttpexporter
+		return exporterhelper.NewTraces(ctx, set, cfg,
+			exporter.ConsumeTraces,
+			exporterhelper.WithStart(exporter.Start),
+			exporterhelper.WithShutdown(exporter.Shutdown),
+			exporterhelper.WithCapabilities(consumer.Capabilities{MutatesData: false}),
+			exporterhelper.WithQueue(config.QueueConfig),
+			exporterhelper.WithBatcher(batchCfg),
+			exporterhelper.WithRetry(config.RetryConfig))
 	case ProtocolGRPC:
 		slog.Debug("instantiating GRPC TracesReporter", "protocol", proto)
 		var t trace.SpanExporter
@@ -253,7 +327,7 @@ func getTracesExporter(ctx context.Context, cfg TracesConfig, ctxInfo *global.Co
 			return nil, err
 		}
 		if t, err = grpcTracer(ctx, opts); err != nil {
-			slog.Error("can't instantiate OTEL GRPC traces exporter: %w", err)
+			slog.Error("can't instantiate OTEL GRPC traces exporter", "error", err)
 			return nil, err
 		}
 		endpoint, _, err := parseTracesEndpoint(&cfg)
@@ -263,7 +337,15 @@ func getTracesExporter(ctx context.Context, cfg TracesConfig, ctxInfo *global.Co
 		}
 		factory := otlpexporter.NewFactory()
 		config := factory.CreateDefaultConfig().(*otlpexporter.Config)
-		config.QueueConfig.Enabled = false
+		// Experimental API for batching
+		// See: https://github.com/open-telemetry/opentelemetry-collector/issues/8122
+		if cfg.MaxExportBatchSize > 0 {
+			config.BatcherConfig.Enabled = true
+			config.BatcherConfig.MaxSizeConfig.MaxSizeItems = cfg.MaxExportBatchSize
+			if cfg.BatchTimeout > 0 {
+				config.BatcherConfig.FlushTimeout = cfg.BatchTimeout
+			}
+		}
 		config.RetryConfig = getRetrySettings(cfg)
 		config.ClientConfig = configgrpc.ClientConfig{
 			Endpoint: endpoint.String(),
@@ -271,9 +353,10 @@ func getTracesExporter(ctx context.Context, cfg TracesConfig, ctxInfo *global.Co
 				Insecure:           opts.Insecure,
 				InsecureSkipVerify: cfg.InsecureSkipVerify,
 			},
+			Headers: convertHeaders(opts.Headers),
 		}
-		set := getTraceSettings(ctxInfo, cfg, t)
-		return factory.CreateTracesExporter(ctx, set, config)
+		set := getTraceSettings(ctxInfo, t)
+		return factory.CreateTraces(ctx, set, config)
 	default:
 		slog.Error(fmt.Sprintf("invalid protocol value: %q. Accepted values are: %s, %s, %s",
 			proto, ProtocolGRPC, ProtocolHTTPJSON, ProtocolHTTPProtobuf))
@@ -304,52 +387,33 @@ func instrumentTraceExporter(in trace.SpanExporter, internalMetrics imetrics.Rep
 	}
 }
 
-func traceProviderWithInternalMetrics(ctxInfo *global.ContextInfo, cfg TracesConfig, in trace.SpanExporter) trace2.TracerProvider {
-	var opts []trace.BatchSpanProcessorOption
-	if cfg.MaxExportBatchSize > 0 {
-		opts = append(opts, trace.WithMaxExportBatchSize(cfg.MaxExportBatchSize))
-	}
-	if cfg.MaxQueueSize > 0 {
-		opts = append(opts, trace.WithMaxQueueSize(cfg.MaxQueueSize))
-	}
-	if cfg.BatchTimeout > 0 {
-		opts = append(opts, trace.WithBatchTimeout(cfg.BatchTimeout))
-	}
-	if cfg.ExportTimeout > 0 {
-		opts = append(opts, trace.WithExportTimeout(cfg.ExportTimeout))
-	}
-	tracer := instrumentTraceExporter(in, ctxInfo.Metrics)
-	bsp := trace.NewBatchSpanProcessor(tracer, opts...)
-	return trace.NewTracerProvider(
-		trace.WithSpanProcessor(bsp),
-		trace.WithSampler(cfg.Sampler.Implementation()),
-	)
-}
-
-func getTraceSettings(ctxInfo *global.ContextInfo, cfg TracesConfig, in trace.SpanExporter) exporter.CreateSettings {
+func getTraceSettings(ctxInfo *global.ContextInfo, in trace.SpanExporter) exporter.Settings {
 	var traceProvider trace2.TracerProvider
-
 	telemetryLevel := configtelemetry.LevelNone
 	traceProvider = tracenoop.NewTracerProvider()
-
 	if internalMetricsEnabled(ctxInfo) {
 		telemetryLevel = configtelemetry.LevelBasic
-		traceProvider = traceProviderWithInternalMetrics(ctxInfo, cfg, in)
+		spanExporter := instrumentTraceExporter(in, ctxInfo.Metrics)
+		res := newResourceInternal(ctxInfo.HostID)
+		traceProvider = trace.NewTracerProvider(
+			trace.WithBatcher(spanExporter),
+			trace.WithResource(res),
+		)
 	}
-
+	meterProvider := metric.NewMeterProvider()
 	telemetrySettings := component.TelemetrySettings{
 		Logger:         zap.NewNop(),
-		MeterProvider:  metric.NewMeterProvider(),
+		MeterProvider:  meterProvider,
 		TracerProvider: traceProvider,
 		MetricsLevel:   telemetryLevel,
-		ReportStatus: func(event *component.StatusEvent) {
-			if err := event.Err(); err != nil {
-				slog.Error("error reported by component", "error", err)
-			}
-		},
 	}
-	return exporter.CreateSettings{
-		ID:                component.NewIDWithName(component.DataTypeMetrics, "beyla"),
+
+	// component.DataTypeMetrics was removed in collector API v0.112.0 but its value is still required here
+	// dataTypeMetrics variable hardcodes the previous value for the removed constant
+	// TODO: replace legacy API
+	dataTypeMetrics := component.MustNewType("metrics")
+	return exporter.Settings{
+		ID:                component.NewIDWithName(dataTypeMetrics, "beyla"),
 		TelemetrySettings: telemetrySettings,
 	}
 }
@@ -368,8 +432,9 @@ func getRetrySettings(cfg TracesConfig) configretry.BackOffConfig {
 	return backOffCfg
 }
 
-func traceAppResourceAttrs(hostID string, service *svc.ID) []attribute.KeyValue {
-	if service.UID == "" {
+func traceAppResourceAttrs(hostID string, service *svc.Attrs) []attribute.KeyValue {
+	// TODO: remove?
+	if service.UID == emptyUID {
 		return getAppResourceAttrs(hostID, service)
 	}
 
@@ -383,24 +448,24 @@ func traceAppResourceAttrs(hostID string, service *svc.ID) []attribute.KeyValue 
 	return attrs
 }
 
-// GenerateTraces creates a ptrace.Traces from a request.Span
-func GenerateTraces(span *request.Span, hostID string, userAttrs map[attr.Name]struct{}, envResourceAttrs []attribute.KeyValue) ptrace.Traces {
+func GenerateTracesWithAttributes(span *request.Span, hostID string, attrs []attribute.KeyValue, envResourceAttrs []attribute.KeyValue) ptrace.Traces {
 	t := span.Timings()
 	start := spanStartTime(t)
 	hasSubSpans := t.Start.After(start)
 	traces := ptrace.NewTraces()
 	rs := traces.ResourceSpans().AppendEmpty()
 	ss := rs.ScopeSpans().AppendEmpty()
-	resourceAttrs := traceAppResourceAttrs(hostID, &span.ServiceID)
+	resourceAttrs := traceAppResourceAttrs(hostID, &span.Service)
 	resourceAttrs = append(resourceAttrs, envResourceAttrs...)
 	resourceAttrsMap := attrsToMap(resourceAttrs)
 	resourceAttrsMap.PutStr(string(semconv.OTelLibraryNameKey), reporterName)
 	resourceAttrsMap.CopyTo(rs.Resource().Attributes())
 
 	traceID := pcommon.TraceID(span.TraceID)
-	spanID := pcommon.SpanID(randomSpanID())
+	spanID := pcommon.SpanID(RandomSpanID())
+	// This should never happen
 	if traceID.IsEmpty() {
-		traceID = pcommon.TraceID(randomTraceID())
+		traceID = pcommon.TraceID(RandomTraceID())
 	}
 
 	if hasSubSpans {
@@ -423,7 +488,6 @@ func GenerateTraces(span *request.Span, hostID string, userAttrs map[attr.Name]s
 	}
 
 	// Set span attributes
-	attrs := traceAttributes(span, userAttrs)
 	m := attrsToMap(attrs)
 	m.CopyTo(s.Attributes())
 
@@ -432,6 +496,11 @@ func GenerateTraces(span *request.Span, hostID string, userAttrs map[attr.Name]s
 	s.Status().SetCode(statusCode)
 	s.SetEndTimestamp(pcommon.NewTimestampFromTime(t.End))
 	return traces
+}
+
+// GenerateTraces creates a ptrace.Traces from a request.Span
+func GenerateTraces(span *request.Span, hostID string, userAttrs map[attr.Name]struct{}, envResourceAttrs []attribute.KeyValue) ptrace.Traces {
+	return GenerateTracesWithAttributes(span, hostID, traceAttributes(span, userAttrs), envResourceAttrs)
 }
 
 // createSubSpans creates the internal spans for a request.Span
@@ -443,7 +512,7 @@ func createSubSpans(span *request.Span, parentSpanID pcommon.SpanID, traceID pco
 	spQ.SetKind(ptrace.SpanKindInternal)
 	spQ.SetEndTimestamp(pcommon.NewTimestampFromTime(t.Start))
 	spQ.SetTraceID(traceID)
-	spQ.SetSpanID(pcommon.SpanID(randomSpanID()))
+	spQ.SetSpanID(pcommon.SpanID(RandomSpanID()))
 	spQ.SetParentSpanID(parentSpanID)
 
 	// Create a child span showing the processing time
@@ -456,7 +525,7 @@ func createSubSpans(span *request.Span, parentSpanID pcommon.SpanID, traceID pco
 	if span.SpanID.IsValid() {
 		spP.SetSpanID(pcommon.SpanID(span.SpanID))
 	} else {
-		spP.SetSpanID(pcommon.SpanID(randomSpanID()))
+		spP.SetSpanID(pcommon.SpanID(RandomSpanID()))
 	}
 	spP.SetParentSpanID(parentSpanID)
 }
@@ -533,6 +602,10 @@ func (tr *tracesOTELReceiver) acceptSpan(span *request.Span) bool {
 	return false
 }
 
+// TODO use semconv.DBSystemRedis when we update to OTEL semantic conventions library 1.30
+var dbSystemRedis = attribute.String(string(attr.DBSystemName), semconv.DBSystemRedis.Value.AsString())
+var spanMetricsSkip = attribute.Bool(string(attr.SkipSpanMetrics), true)
+
 // nolint:cyclop
 func traceAttributes(span *request.Span, optionalAttrs map[attr.Name]struct{}) []attribute.KeyValue {
 	var attrs []attribute.KeyValue
@@ -543,7 +616,7 @@ func traceAttributes(span *request.Span, optionalAttrs map[attr.Name]struct{}) [
 			request.HTTPRequestMethod(span.Method),
 			request.HTTPResponseStatusCode(span.Status),
 			request.HTTPUrlPath(span.Path),
-			request.ClientAddr(request.SpanPeer(span)),
+			request.ClientAddr(request.PeerAsClient(span)),
 			request.ServerAddr(request.SpanHost(span)),
 			request.ServerPort(span.HostPort),
 			request.HTTPRequestBodySize(int(span.RequestLength())),
@@ -556,16 +629,24 @@ func traceAttributes(span *request.Span, optionalAttrs map[attr.Name]struct{}) [
 			semconv.RPCMethod(span.Path),
 			semconv.RPCSystemGRPC,
 			semconv.RPCGRPCStatusCodeKey.Int(span.Status),
-			request.ClientAddr(request.SpanPeer(span)),
+			request.ClientAddr(request.PeerAsClient(span)),
 			request.ServerAddr(request.SpanHost(span)),
 			request.ServerPort(span.HostPort),
 		}
 	case request.EventTypeHTTPClient:
+		host := request.HTTPClientHost(span)
+		scheme := request.HTTPScheme(span)
+		url := span.Path
+		if span.HasOriginalHost() {
+			url = request.URLFull(scheme, host, span.Path)
+		}
+
 		attrs = []attribute.KeyValue{
 			request.HTTPRequestMethod(span.Method),
 			request.HTTPResponseStatusCode(span.Status),
-			request.HTTPUrlFull(span.Path),
-			request.ServerAddr(request.SpanHost(span)),
+			request.HTTPUrlFull(url),
+			semconv.HTTPScheme(scheme),
+			request.ServerAddr(host),
 			request.ServerPort(span.HostPort),
 			request.HTTPRequestBodySize(int(span.RequestLength())),
 		}
@@ -574,14 +655,14 @@ func traceAttributes(span *request.Span, optionalAttrs map[attr.Name]struct{}) [
 			semconv.RPCMethod(span.Path),
 			semconv.RPCSystemGRPC,
 			semconv.RPCGRPCStatusCodeKey.Int(span.Status),
-			request.ServerAddr(request.SpanHost(span)),
+			request.ServerAddr(request.HostAsServer(span)),
 			request.ServerPort(span.HostPort),
 		}
 	case request.EventTypeSQLClient:
 		attrs = []attribute.KeyValue{
-			request.ServerAddr(request.SpanHost(span)),
+			request.ServerAddr(request.HostAsServer(span)),
 			request.ServerPort(span.HostPort),
-			semconv.DBSystemOtherSQL, // We can distinguish in the future for MySQL, Postgres etc
+			span.DBSystemName(), // We can distinguish in the future for MySQL, Postgres etc
 		}
 		if _, ok := optionalAttrs[attr.DBQueryText]; ok {
 			attrs = append(attrs, request.DBQueryText(span.Statement))
@@ -596,9 +677,9 @@ func traceAttributes(span *request.Span, optionalAttrs map[attr.Name]struct{}) [
 		}
 	case request.EventTypeRedisServer, request.EventTypeRedisClient:
 		attrs = []attribute.KeyValue{
-			request.ServerAddr(request.SpanHost(span)),
+			request.ServerAddr(request.HostAsServer(span)),
 			request.ServerPort(span.HostPort),
-			semconv.DBSystemRedis,
+			dbSystemRedis,
 		}
 		operation := span.Method
 		if operation != "" {
@@ -613,13 +694,17 @@ func traceAttributes(span *request.Span, optionalAttrs map[attr.Name]struct{}) [
 	case request.EventTypeKafkaServer, request.EventTypeKafkaClient:
 		operation := request.MessagingOperationType(span.Method)
 		attrs = []attribute.KeyValue{
-			request.ServerAddr(request.SpanHost(span)),
+			request.ServerAddr(request.HostAsServer(span)),
 			request.ServerPort(span.HostPort),
 			semconv.MessagingSystemKafka,
 			semconv.MessagingDestinationName(span.Path),
-			semconv.MessagingClientID(span.OtherNamespace),
+			semconv.MessagingClientID(span.Statement),
 			operation,
 		}
+	}
+
+	if _, ok := optionalAttrs[attr.SkipSpanMetrics]; ok {
+		attrs = append(attrs, spanMetricsSkip)
 	}
 
 	return attrs
@@ -627,11 +712,11 @@ func traceAttributes(span *request.Span, optionalAttrs map[attr.Name]struct{}) [
 
 func spanKind(span *request.Span) trace2.SpanKind {
 	switch span.Type {
-	case request.EventTypeHTTP, request.EventTypeGRPC, request.EventTypeRedisServer:
+	case request.EventTypeHTTP, request.EventTypeGRPC, request.EventTypeRedisServer, request.EventTypeKafkaServer:
 		return trace2.SpanKindServer
 	case request.EventTypeHTTPClient, request.EventTypeGRPCClient, request.EventTypeSQLClient, request.EventTypeRedisClient:
 		return trace2.SpanKindClient
-	case request.EventTypeKafkaClient, request.EventTypeKafkaServer:
+	case request.EventTypeKafkaClient:
 		switch span.Method {
 		case request.MessagingPublish:
 			return trace2.SpanKindProducer
@@ -657,15 +742,7 @@ func spanStartTime(t request.Timings) time.Time {
 // If, by some reason, Grafana changes its OTLP Gateway URL in a distant future, you can still point to the
 // correct URL with the OTLP_EXPORTER_... variables.
 func parseTracesEndpoint(cfg *TracesConfig) (*url.URL, bool, error) {
-	isCommon := false
-	endpoint := cfg.TracesEndpoint
-	if endpoint == "" {
-		isCommon = true
-		endpoint = cfg.CommonEndpoint
-		if endpoint == "" && cfg.Grafana != nil && cfg.Grafana.CloudZone != "" {
-			endpoint = cfg.Grafana.Endpoint()
-		}
-	}
+	endpoint, isCommon := cfg.OTLPTracesEndpoint()
 
 	murl, err := url.Parse(endpoint)
 	if err != nil {
@@ -678,7 +755,7 @@ func parseTracesEndpoint(cfg *TracesConfig) (*url.URL, bool, error) {
 }
 
 func getHTTPTracesEndpointOptions(cfg *TracesConfig) (otlpOptions, error) {
-	opts := otlpOptions{HTTPHeaders: map[string]string{}}
+	opts := otlpOptions{Headers: map[string]string{}}
 	log := tlog().With("transport", "http")
 
 	murl, isCommon, err := parseTracesEndpoint(cfg)
@@ -710,14 +787,14 @@ func getHTTPTracesEndpointOptions(cfg *TracesConfig) (otlpOptions, error) {
 	}
 
 	cfg.Grafana.setupOptions(&opts)
-	maps.Copy(opts.HTTPHeaders, headersFromEnv(envHeaders))
-	maps.Copy(opts.HTTPHeaders, headersFromEnv(envTracesHeaders))
+	maps.Copy(opts.Headers, HeadersFromEnv(envHeaders))
+	maps.Copy(opts.Headers, HeadersFromEnv(envTracesHeaders))
 
 	return opts, nil
 }
 
 func getGRPCTracesEndpointOptions(cfg *TracesConfig) (otlpOptions, error) {
-	opts := otlpOptions{}
+	opts := otlpOptions{Headers: map[string]string{}}
 	log := tlog().With("transport", "grpc")
 	murl, _, err := parseTracesEndpoint(cfg)
 	if err != nil {
@@ -737,6 +814,9 @@ func getGRPCTracesEndpointOptions(cfg *TracesConfig) (otlpOptions, error) {
 		opts.SkipTLSVerify = true
 	}
 
+	cfg.Grafana.setupOptions(&opts)
+	maps.Copy(opts.Headers, HeadersFromEnv(envHeaders))
+	maps.Copy(opts.Headers, HeadersFromEnv(envTracesHeaders))
 	return opts, nil
 }
 

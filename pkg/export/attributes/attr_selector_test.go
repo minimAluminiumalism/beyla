@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
 )
 
 func TestNormalize(t *testing.T) {
@@ -27,7 +27,7 @@ func TestFor(t *testing.T) {
 	p, err := NewAttrSelector(GroupKubernetes, Selection{
 		"beyla_network_flow_bytes_total": InclusionLists{
 			Include: []string{"beyla_ip", "src.*", "k8s.*"},
-			Exclude: []string{"k8s_*_name", "k8s.*.type"},
+			Exclude: []string{"k8s_*_name", "k8s.*.type", "*zone"},
 		},
 	})
 	require.NoError(t, err)
@@ -54,7 +54,7 @@ func TestFor_GlobEntries(t *testing.T) {
 		},
 		"beyla_network_flow_bytes_total": InclusionLists{
 			Include: []string{"src.*", "k8s.*"},
-			Exclude: []string{"k8s.*.name"},
+			Exclude: []string{"k8s.*.name", "*zone"},
 		},
 	})
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestFor_GlobEntries_NoInclusion(t *testing.T) {
 			Exclude: []string{"*dst*"},
 		},
 		"beyla_network_flow_bytes_total": InclusionLists{
-			Exclude: []string{"k8s.*.namespace"},
+			Exclude: []string{"k8s.*.namespace", "*zone"},
 		},
 	})
 	require.NoError(t, err)
@@ -89,6 +89,7 @@ func TestFor_GlobEntries_NoInclusion(t *testing.T) {
 		"direction",
 		"k8s.cluster.name",
 		"k8s.src.owner.name",
+		"k8s.src.owner.type",
 		"src.cidr",
 	}, p.For(BeylaNetworkFlow))
 }
@@ -100,7 +101,7 @@ func TestFor_GlobEntries_Order(t *testing.T) {
 			Include: []string{"*"},
 		},
 		"beyla_network_*": InclusionLists{
-			Exclude: []string{"dst.*", "transport", "*direction", "iface"},
+			Exclude: []string{"dst.*", "transport", "*direction", "iface", "*zone"},
 		},
 		"beyla_network_flow_bytes_total": InclusionLists{
 			Include: []string{"dst.name"},
@@ -139,7 +140,7 @@ func TestFor_KubeDisabled(t *testing.T) {
 	p, err := NewAttrSelector(0, Selection{
 		"beyla_network_flow_bytes_total": InclusionLists{
 			Include: []string{"target.instance", "beyla_ip", "src.*", "k8s.*"},
-			Exclude: []string{"src.port"},
+			Exclude: []string{"src.port", "*zone"},
 		},
 	})
 	require.NoError(t, err)
@@ -166,8 +167,10 @@ func TestDefault(t *testing.T) {
 		"k8s.cluster.name",
 		"k8s.dst.namespace",
 		"k8s.dst.owner.name",
+		"k8s.dst.owner.type",
 		"k8s.src.namespace",
 		"k8s.src.owner.name",
+		"k8s.src.owner.type",
 	}, p.For(BeylaNetworkFlow))
 }
 

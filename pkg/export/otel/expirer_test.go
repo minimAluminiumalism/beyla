@@ -10,21 +10,18 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/internal/netolly/ebpf"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
-	"github.com/grafana/beyla/test/collector"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/internal/netolly/ebpf"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/test/collector"
 )
 
 const timeout = 20 * time.Second
 
 func TestNetMetricsExpiration(t *testing.T) {
-	// [TODO otel-removal] unskip when this is fixed https://github.com/grafana/beyla/issues/1065
-	// or when this is released into main OTEL https://github.com/open-telemetry/opentelemetry-specification/pull/4135
-	t.Skip("otel-removal is temporarily disabled")
 	defer restoreEnvAfterExecution()()
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
@@ -129,13 +126,10 @@ func TestNetMetricsExpiration(t *testing.T) {
 }
 
 // the expiration logic is held at two levels:
-// (1) by group of attributes within the same service ID,
-// (2) by metric set of a given service ID
+// (1) by group of attributes within the same service Attrs,
+// (2) by metric set of a given service Attrs
 // this test verifies case 1
 func TestAppMetricsExpiration_ByMetricAttrs(t *testing.T) {
-	// [TODO otel-removal] unskip when this is fixed https://github.com/grafana/beyla/issues/1065
-	// or when this is released into main OTEL https://github.com/open-telemetry/opentelemetry-specification/pull/4135
-	t.Skip("otel-removal is temporarily disabled")
 	defer restoreEnvAfterExecution()()
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
@@ -171,8 +165,8 @@ func TestAppMetricsExpiration_ByMetricAttrs(t *testing.T) {
 
 	// WHEN it receives metrics
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 150, End: 175},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 150, End: 175},
 	}
 
 	// THEN the metrics are exported
@@ -195,7 +189,7 @@ func TestAppMetricsExpiration_ByMetricAttrs(t *testing.T) {
 	// AND WHEN it keeps receiving a subset of the initial metrics during the TTL
 	now.Advance(2 * time.Minute)
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 250, End: 280},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 250, End: 280},
 	}
 
 	// THEN THE metrics that have been received during the TTL period are still visible
@@ -209,7 +203,7 @@ func TestAppMetricsExpiration_ByMetricAttrs(t *testing.T) {
 
 	now.Advance(2 * time.Minute)
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 300, End: 310},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 300, End: 310},
 	}
 
 	// makes sure that the records channel is emptied and any remaining
@@ -237,7 +231,7 @@ func TestAppMetricsExpiration_ByMetricAttrs(t *testing.T) {
 	// AND WHEN the metrics labels that disappeared are received again
 	now.Advance(2 * time.Minute)
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 450, End: 520},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 450, End: 520},
 	}
 
 	// THEN they are reported again, starting from zero in the case of counters
@@ -251,13 +245,10 @@ func TestAppMetricsExpiration_ByMetricAttrs(t *testing.T) {
 }
 
 // the expiration logic is held at two levels:
-// (1) by group of attributes within the same service ID,
-// (2) by metric set of a given service ID
+// (1) by group of attributes within the same service Attrs,
+// (2) by metric set of a given service Attrs
 // this test verifies case 2
 func TestAppMetricsExpiration_BySvcID(t *testing.T) {
-	// [TODO otel-removal] unskip when this is fixed https://github.com/grafana/beyla/issues/1065
-	// or when this is released into main OTEL https://github.com/open-telemetry/opentelemetry-specification/pull/4135
-	t.Skip("otel-removal is temporarily disabled")
 	defer restoreEnvAfterExecution()()
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	defer cancelCtx()
@@ -293,8 +284,8 @@ func TestAppMetricsExpiration_BySvcID(t *testing.T) {
 
 	// WHEN it receives metrics
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
-		{ServiceID: svc.ID{UID: "bar"}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 150, End: 175},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "bar"}}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 150, End: 175},
 	}
 
 	// THEN the metrics are exported
@@ -317,7 +308,7 @@ func TestAppMetricsExpiration_BySvcID(t *testing.T) {
 	// AND WHEN it keeps receiving a subset of the initial metrics during the TTL
 	now.Advance(2 * time.Minute)
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 250, End: 280},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 250, End: 280},
 	}
 
 	// THEN THE metrics that have been received during the TTL period are still visible
@@ -331,7 +322,7 @@ func TestAppMetricsExpiration_BySvcID(t *testing.T) {
 
 	now.Advance(2 * time.Minute)
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 300, End: 310},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 300, End: 310},
 	}
 
 	// BUT not the metrics that haven't been received during that time.
@@ -360,7 +351,7 @@ func TestAppMetricsExpiration_BySvcID(t *testing.T) {
 	// AND WHEN the metrics labels that disappeared are received again
 	now.Advance(2 * time.Minute)
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "bar"}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 450, End: 520},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "bar"}}, Type: request.EventTypeHTTP, Path: "/bar", RequestStart: 450, End: 520},
 	}
 
 	// THEN they are reported again, starting from zero in the case of counters

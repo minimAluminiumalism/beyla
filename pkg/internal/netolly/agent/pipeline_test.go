@@ -12,17 +12,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/pkg/beyla"
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/export/otel"
-	"github.com/grafana/beyla/pkg/export/prom"
-	"github.com/grafana/beyla/pkg/internal/connector"
-	"github.com/grafana/beyla/pkg/internal/filter"
-	"github.com/grafana/beyla/pkg/internal/netolly/ebpf"
-	"github.com/grafana/beyla/pkg/internal/netolly/flow/transport"
-	"github.com/grafana/beyla/pkg/internal/netolly/ifaces"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	prom2 "github.com/grafana/beyla/test/integration/components/prom"
+	"github.com/grafana/beyla/v2/pkg/beyla"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/export/prom"
+	"github.com/grafana/beyla/v2/pkg/filter"
+	"github.com/grafana/beyla/v2/pkg/internal/connector"
+	"github.com/grafana/beyla/v2/pkg/internal/netolly/ebpf"
+	"github.com/grafana/beyla/v2/pkg/internal/netolly/flow/transport"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	prom2 "github.com/grafana/beyla/v2/test/integration/components/prom"
 )
 
 const timeout = 5 * time.Second
@@ -56,7 +55,6 @@ func TestFilter(t *testing.T) {
 				},
 			}},
 		},
-		interfaces:     fakeInterfacesInformer{},
 		interfaceNamer: func(_ int) string { return "fakeiface" },
 	}
 
@@ -113,10 +111,4 @@ func fakeRecord(protocol transport.Protocol, srcPort, dstPort uint16) *ebpf.Reco
 			SrcPort: srcPort, DstPort: dstPort, TransportProtocol: uint8(protocol),
 		},
 	}}
-}
-
-type fakeInterfacesInformer struct{}
-
-func (f fakeInterfacesInformer) Subscribe(_ context.Context) (<-chan ifaces.Event, error) {
-	return make(<-chan ifaces.Event), nil
 }

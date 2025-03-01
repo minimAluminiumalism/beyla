@@ -16,13 +16,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
-	"github.com/grafana/beyla/test/collector"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/test/collector"
 )
 
 var fakeMux = sync.Mutex{}
@@ -38,7 +38,7 @@ func TestHTTPMetricsEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with two endpoints", func(t *testing.T) {
-		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3232", URLPath: "/v1/metrics"}, &mcfg)
+		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3232", URLPath: "/v1/metrics", Headers: map[string]string{}}, &mcfg)
 	})
 
 	mcfg = MetricsConfig{
@@ -49,7 +49,7 @@ func TestHTTPMetricsEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with only common endpoint", func(t *testing.T) {
-		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3131", URLPath: "/otlp/v1/metrics"}, &mcfg)
+		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3131", URLPath: "/otlp/v1/metrics", Headers: map[string]string{}}, &mcfg)
 	})
 
 	mcfg = MetricsConfig{
@@ -60,7 +60,7 @@ func TestHTTPMetricsEndpointOptions(t *testing.T) {
 		},
 	}
 	t.Run("testing with insecure endpoint", func(t *testing.T) {
-		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3232", Insecure: true}, &mcfg)
+		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3232", Insecure: true, Headers: map[string]string{}}, &mcfg)
 	})
 
 	mcfg = MetricsConfig{
@@ -72,7 +72,7 @@ func TestHTTPMetricsEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with skip TLS verification", func(t *testing.T) {
-		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3232", URLPath: "/v1/metrics", SkipTLSVerify: true}, &mcfg)
+		testMetricsHTTPOptions(t, otlpOptions{Endpoint: "localhost:3232", URLPath: "/v1/metrics", SkipTLSVerify: true, Headers: map[string]string{}}, &mcfg)
 	})
 }
 
@@ -89,7 +89,7 @@ func TestHTTPMetricsWithGrafanaOptions(t *testing.T) {
 		testMetricsHTTPOptions(t, otlpOptions{
 			Endpoint: "otlp-gateway-eu-west-23.grafana.net",
 			URLPath:  "/otlp/v1/metrics",
-			HTTPHeaders: map[string]string{
+			Headers: map[string]string{
 				// Basic + output of: echo -n 12345:affafafaafkd | gbase64 -w 0
 				"Authorization": "Basic MTIzNDU6YWZmYWZhZmFhZmtk",
 			},
@@ -100,7 +100,7 @@ func TestHTTPMetricsWithGrafanaOptions(t *testing.T) {
 		testMetricsHTTPOptions(t, otlpOptions{
 			Endpoint: "localhost:3939",
 			URLPath:  "/v1/metrics",
-			HTTPHeaders: map[string]string{
+			Headers: map[string]string{
 				// Basic + output of: echo -n 12345:affafafaafkd | gbase64 -w 0
 				"Authorization": "Basic MTIzNDU6YWZmYWZhZmFhZmtk",
 			},
@@ -251,7 +251,7 @@ func TestGRPCMetricsEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with two endpoints", func(t *testing.T) {
-		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232"}, &mcfg)
+		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", Headers: map[string]string{}}, &mcfg)
 	})
 
 	mcfg = MetricsConfig{
@@ -260,7 +260,7 @@ func TestGRPCMetricsEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with only common endpoint", func(t *testing.T) {
-		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3131"}, &mcfg)
+		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3131", Headers: map[string]string{}}, &mcfg)
 	})
 
 	mcfg = MetricsConfig{
@@ -269,7 +269,7 @@ func TestGRPCMetricsEndpointOptions(t *testing.T) {
 		Instrumentations: []string{instrumentations.InstrumentationHTTP},
 	}
 	t.Run("testing with insecure endpoint", func(t *testing.T) {
-		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", Insecure: true}, &mcfg)
+		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", Insecure: true, Headers: map[string]string{}}, &mcfg)
 	})
 
 	mcfg = MetricsConfig{
@@ -279,7 +279,7 @@ func TestGRPCMetricsEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with skip TLS verification", func(t *testing.T) {
-		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", SkipTLSVerify: true}, &mcfg)
+		testMetricsGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", SkipTLSVerify: true, Headers: map[string]string{}}, &mcfg)
 	})
 }
 
@@ -492,15 +492,15 @@ func TestAppMetrics_ByInstrumentation(t *testing.T) {
 			*/
 			// WHEN it receives metrics
 			metrics <- []request.Span{
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTPClient, Path: "/bar", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeGRPC, Path: "/foo", RequestStart: 100, End: 200},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeGRPCClient, Path: "/bar", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeSQLClient, Path: "SELECT", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeRedisClient, Method: "SET", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeRedisServer, Method: "GET", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeKafkaClient, Method: "publish", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeKafkaServer, Method: "process", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTPClient, Path: "/bar", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeGRPC, Path: "/foo", RequestStart: 100, End: 200},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeGRPCClient, Path: "/bar", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeSQLClient, Path: "SELECT", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeRedisClient, Method: "SET", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeRedisServer, Method: "GET", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeKafkaClient, Method: "publish", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeKafkaServer, Method: "process", RequestStart: 150, End: 175},
 			}
 
 			// Read the exported metrics, add +extraColl for HTTP size metrics
@@ -545,7 +545,7 @@ func TestAppMetrics_ResourceAttributes(t *testing.T) {
 	go otelExporter(metrics)
 
 	metrics <- []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
 	}
 
 	res := readNChan(t, otlp.Records(), 1, timeout)
@@ -569,6 +569,64 @@ func TestMetricsConfig_Disabled(t *testing.T) {
 	// application feature is not enabled
 	assert.False(t, (&MetricsConfig{CommonEndpoint: "foo"}).Enabled())
 	assert.False(t, (&MetricsConfig{Grafana: &GrafanaOTLP{Submit: []string{"traces", "metrics"}, InstanceID: "33221"}}).Enabled())
+}
+
+func TestSpanMetricsDiscarded(t *testing.T) {
+	mc := MetricsConfig{
+		Features: []string{FeatureApplication},
+	}
+	mr := MetricsReporter{
+		cfg: &mc,
+	}
+
+	svcNoExport := svc.Attrs{}
+
+	svcExportMetrics := svc.Attrs{}
+	svcExportMetrics.SetExportsOTelMetrics()
+
+	svcExportTraces := svc.Attrs{}
+	svcExportTraces.SetExportsOTelTraces()
+
+	tests := []struct {
+		name      string
+		span      request.Span
+		discarded bool
+	}{
+		{
+			name:      "Foo span is not filtered",
+			span:      request.Span{Service: svcNoExport, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
+			discarded: false,
+		},
+		{
+			name:      "/v1/metrics span is filtered",
+			span:      request.Span{Service: svcExportMetrics, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/v1/metrics", RequestStart: 100, End: 200},
+			discarded: true,
+		},
+		{
+			name:      "/v1/traces span is not filtered",
+			span:      request.Span{Service: svcExportTraces, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/v1/traces", RequestStart: 100, End: 200},
+			discarded: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.discarded, !otelSpanAccepted(&tt.span, &mr), tt.name)
+		})
+	}
+}
+
+func TestMetricsInterval(t *testing.T) {
+	cfg := MetricsConfig{
+		OTELIntervalMS: 60_000,
+	}
+	t.Run("If only OTEL is defined, it uses that value", func(t *testing.T) {
+		assert.Equal(t, 60*time.Second, cfg.GetInterval())
+	})
+	cfg.Interval = 5 * time.Second
+	t.Run("Beyla interval takes precedence over OTEL", func(t *testing.T) {
+		assert.Equal(t, 5*time.Second, cfg.GetInterval())
+	})
 }
 
 func (f *fakeInternalMetrics) OTELMetricExport(len int) {

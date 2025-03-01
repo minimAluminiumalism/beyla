@@ -7,12 +7,12 @@ import (
 	"github.com/caarlos0/env/v9"
 	gin2 "github.com/gin-gonic/gin"
 
-	"github.com/grafana/beyla/test/integration/components/testserver/gin"
-	"github.com/grafana/beyla/test/integration/components/testserver/gorilla"
-	"github.com/grafana/beyla/test/integration/components/testserver/gorillamid"
-	"github.com/grafana/beyla/test/integration/components/testserver/gorillamid2"
-	grpctest "github.com/grafana/beyla/test/integration/components/testserver/grpc/server"
-	"github.com/grafana/beyla/test/integration/components/testserver/std"
+	"github.com/grafana/beyla/v2/test/integration/components/testserver/gin"
+	"github.com/grafana/beyla/v2/test/integration/components/testserver/gorilla"
+	"github.com/grafana/beyla/v2/test/integration/components/testserver/gorillamid"
+	"github.com/grafana/beyla/v2/test/integration/components/testserver/gorillamid2"
+	grpctest "github.com/grafana/beyla/v2/test/integration/components/testserver/grpc/server"
+	"github.com/grafana/beyla/v2/test/integration/components/testserver/std"
 )
 
 /*
@@ -41,7 +41,7 @@ type config struct {
 func main() {
 	cfg := config{}
 	if err := env.Parse(&cfg); err != nil {
-		slog.Error("can't load configuration from environment", err)
+		slog.Error("can't load configuration from environment", "error", err)
 		os.Exit(-1)
 	}
 	setupLog(&cfg)
@@ -97,7 +97,7 @@ func setupLog(cfg *config) {
 	lvl := slog.LevelInfo
 	err := lvl.UnmarshalText([]byte(cfg.LogLevel))
 	if err != nil {
-		slog.Error("unknown log level specified, choises are [DEBUG, INFO, WARN, ERROR]", err)
+		slog.Error("unknown log level specified, choises are [DEBUG, INFO, WARN, ERROR]", "error", err)
 		os.Exit(-1)
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{

@@ -8,16 +8,19 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"unsafe"
 
 	"github.com/cilium/ebpf/ringbuf"
-	"go.opentelemetry.io/otel/trace"
 
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
 )
 
+// misses serviceID
 func httpInfoToSpan(info *HTTPInfo) request.Span {
+	scheme := "http"
+	if info.Ssl == 1 {
+		scheme = "https"
+	}
+
 	return request.Span{
 		Type:          request.EventType(info.Type),
 		Method:        info.Method,
@@ -31,16 +34,16 @@ func httpInfoToSpan(info *HTTPInfo) request.Span {
 		Start:         int64(info.StartMonotimeNs),
 		End:           int64(info.EndMonotimeNs),
 		Status:        int(info.Status),
-		ServiceID:     info.Service,
-		TraceID:       trace.TraceID(info.Tp.TraceId),
-		SpanID:        trace.SpanID(info.Tp.SpanId),
-		ParentSpanID:  trace.SpanID(info.Tp.ParentId),
+		TraceID:       info.Tp.TraceId,
+		SpanID:        info.Tp.SpanId,
+		ParentSpanID:  info.Tp.ParentId,
 		Flags:         info.Tp.Flags,
 		Pid: request.PidInfo{
 			HostPID:   info.Pid.HostPid,
 			UserPID:   info.Pid.UserPid,
 			Namespace: info.Pid.Ns,
 		},
+		Statement: scheme + request.SchemeHostSeparator + info.HeaderHost,
 	}
 }
 
@@ -54,11 +57,11 @@ func removeQuery(url string) string {
 
 type HTTPInfo struct {
 	BPFHTTPInfo
-	Method  string
-	URL     string
-	Host    string
-	Peer    string
-	Service svc.ID
+	Method     string
+	URL        string
+	Host       string
+	Peer       string
+	HeaderHost string
 }
 
 func ReadHTTPInfoIntoSpan(record *ringbuf.Record, filter ServiceFilter) (request.Span, bool, error) {
@@ -79,22 +82,33 @@ func ReadHTTPInfoIntoSpan(record *ringbuf.Record, filter ServiceFilter) (request
 func HTTPInfoEventToSpan(event BPFHTTPInfo) (request.Span, bool, error) {
 	result := HTTPInfo{BPFHTTPInfo: event}
 
+	var bufHost string
+	var bufPort int
+	parsedHost := false
+
 	// When we can't find the connection info, we signal that through making the
 	// source and destination ports equal to max short. E.g. async SSL
 	if event.ConnInfo.S_port != 0 || event.ConnInfo.D_port != 0 {
-		source, target := (*BPFConnInfo)(unsafe.Pointer(&event.ConnInfo)).reqHostInfo()
+		source, target := (*BPFConnInfo)(&event.ConnInfo).reqHostInfo()
 		result.Host = target
 		result.Peer = source
 	} else {
-		host, port := event.hostFromBuf()
+		bufHost, bufPort = event.hostFromBuf()
+		parsedHost = true
 
-		if port >= 0 {
-			result.Host = host
-			result.ConnInfo.D_port = uint16(port)
+		if bufPort >= 0 {
+			result.Host = bufHost
+			result.ConnInfo.D_port = uint16(bufPort)
 		}
 	}
 	result.URL = event.url()
 	result.Method = event.method()
+
+	if request.EventType(result.Type) == request.EventTypeHTTPClient && !parsedHost {
+		bufHost, _ = event.hostFromBuf()
+	}
+
+	result.HeaderHost = bufHost
 
 	return httpInfoToSpan(&result), false, nil
 }
@@ -159,7 +173,7 @@ func (event *BPFHTTPInfo) hostFromBuf() (string, int) {
 	host, portStr, err := net.SplitHostPort(buf[:rIdx])
 
 	if err != nil {
-		return "", -1
+		return buf[:rIdx], -1
 	}
 
 	port, _ := strconv.Atoi(portStr)

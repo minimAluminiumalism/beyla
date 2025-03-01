@@ -2,7 +2,7 @@
 title: Beyla exported metrics
 menuTitle: Exported metrics
 description: Learn about the HTTP/gRPC metrics Beyla can export.
-weight: 4
+weight: 21
 keywords:
   - Beyla
   - eBPF
@@ -34,6 +34,7 @@ The following table describes the exported metrics in both OpenTelemetry and Pro
 | Application process | `process.disk.io`               | `process_disk_io_bytes_total`          | Counter       | bytes   | Disk bytes transferred                                                                                                               |
 | Application process | `process.network.io`            | `process_network_io_bytes_total`       | Counter       | bytes   | Network bytes transferred                                                                                                            |
 | Network             | `beyla.network.flow.bytes`      | `beyla_network_flow_bytes`             | Counter       | bytes   | Bytes submitted from a source network endpoint to a destination network endpoint                                                     |
+| Network             | `beyla.network.inter.zone.bytes`| `beyla_network_inter_zone_bytes`       | Counter       | bytes   | Bytes flowing between cloud availability zones in your cluster (Experimental, currently only available in Kubernetes)                |
 
 Beyla can also export [Span metrics](/docs/tempo/latest/metrics-generator/span_metrics/) and
 [Service graph metrics](/docs/tempo/latest/metrics-generator/service-graph-view/), which you can enable via the
@@ -50,18 +51,20 @@ In order to configure which attributes to show or which attributes to hide, chec
 | Application (all)              | `http.request.method`        | shown                                             |
 | Application (all)              | `http.response.status_code`  | shown                                             |
 | Application (all)              | `http.route`                 | shown if `routes` configuration section exists    |
-| Application (all)              | `k8s.daemonset.name`         | shown if network metrics are enabled              |
-| Application (all)              | `k8s.deployment.name`        | shown if network metrics are enabled              |
-| Application (all)              | `k8s.namespace.name`         | shown if network metrics are enabled              |
-| Application (all)              | `k8s.node.name`              | shown if network metrics are enabled              |
-| Application (all)              | `k8s.pod.name`               | shown if network metrics are enabled              |
-| Application (all)              | `k8s.pod.start_time`         | shown if network metrics are enabled              |
-| Application (all)              | `k8s.pod.uid`                | shown if network metrics are enabled              |
-| Application (all)              | `k8s.replicaset.name`        | shown if network metrics are enabled              |
-| Application (all)              | `k8s.statefulset.name`       | shown if network metrics are enabled              |
-| Application (all)              | `k8s.cluster.name`           | shown if network metrics are enabled              |
-| Application (all)              | `service.name`               | shown                                             | 
-| Application (all)              | `service.namespace`          | shown                                             | 
+| Application (all)              | `k8s.daemonset.name`         | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.deployment.name`        | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.namespace.name`         | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.node.name`              | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.owner.name`             | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.pod.name`               | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.container.name`         | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.pod.start_time`         | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.pod.uid`                | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.replicaset.name`        | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.statefulset.name`       | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `k8s.cluster.name`           | shown if Kubernetes metadata is enabled           |
+| Application (all)              | `service.name`               | shown                                             |
+| Application (all)              | `service.namespace`          | shown                                             |
 | Application (all)              | `target.instance`            | shown                                             |
 | Application (all)              | `url.path`                   | hidden                                            |
 | Application (client)           | `server.address`             | hidden                                            |
@@ -91,32 +94,39 @@ In order to configure which attributes to show or which attributes to hide, chec
 | `beyla.network.flow.bytes`     | `dst.cidr`                   | shown if the `cidrs` configuration section exists |
 | `beyla.network.flow.bytes`     | `dst.name`                   | hidden                                            |
 | `beyla.network.flow.bytes`     | `dst.port`                   | hidden                                            |
+| `beyla.network.flow.bytes`     | `dst.zone` (only Kubernetes) | hidden                                            |
 | `beyla.network.flow.bytes`     | `iface`                      | hidden                                            |
-| `beyla.network.flow.bytes`     | `k8s.cluster.name`           | shown if network metrics are enabled              |
-| `beyla.network.flow.bytes`     | `k8s.dst.name`               | hidden                                            | 
-| `beyla.network.flow.bytes`     | `k8s.dst.namespace`          | shown if network metrics are enabled              | 
+| `beyla.network.flow.bytes`     | `k8s.cluster.name`           | shown if Kubernetes is enabled                    |
+| `beyla.network.flow.bytes`     | `k8s.dst.name`               | hidden                                            |
+| `beyla.network.flow.bytes`     | `k8s.dst.namespace`          | shown if Kubernetes is enabled                    |
 | `beyla.network.flow.bytes`     | `k8s.dst.node.ip`            | hidden                                            |
 | `beyla.network.flow.bytes`     | `k8s.dst.node.name`          | hidden                                            |
-| `beyla.network.flow.bytes`     | `k8s.dst.owner.type`         | hidden                                            | 
+| `beyla.network.flow.bytes`     | `k8s.dst.owner.type`         | hidden                                            |
 | `beyla.network.flow.bytes`     | `k8s.dst.type`               | hidden                                            |
-| `beyla.network.flow.bytes`     | `k8s.dst.owner.name`         | shown if network metrics are enabled              | 
-| `beyla.network.flow.bytes`     | `k8s.src.name`               | hidden                                            | 
-| `beyla.network.flow.bytes`     | `k8s.src.namespace`          | shown if network metrics are enabled              | 
+| `beyla.network.flow.bytes`     | `k8s.dst.owner.name`         | shown if Kubernetes is enabled                    |
+| `beyla.network.flow.bytes`     | `k8s.src.name`               | hidden                                            |
+| `beyla.network.flow.bytes`     | `k8s.src.namespace`          | shown if Kubernetes is enabled                    |
 | `beyla.network.flow.bytes`     | `k8s.src.node.ip`            | hidden                                            |
-| `beyla.network.flow.bytes`     | `k8s.src.owner.name`         | shown if network metrics are enabled              |
+| `beyla.network.flow.bytes`     | `k8s.src.owner.name`         | shown if Kubernetes is enabled                    |
 | `beyla.network.flow.bytes`     | `k8s.src.owner.type`         | hidden                                            |
-| `beyla.network.flow.bytes`     | `k8s.src.type`               | hidden                                            | 
+| `beyla.network.flow.bytes`     | `k8s.src.type`               | hidden                                            |
 | `beyla.network.flow.bytes`     | `server.port`                | hidden                                            |
 | `beyla.network.flow.bytes`     | `src.address`                | hidden                                            |
 | `beyla.network.flow.bytes`     | `src.cidr`                   | shown if the `cidrs` configuration section exists |
 | `beyla.network.flow.bytes`     | `src.name`                   | hidden                                            |
 | `beyla.network.flow.bytes`     | `src.port`                   | hidden                                            |
+| `beyla.network.flow.bytes`     | `src.zone` (only Kubernetes) | hidden                                            |
 | `beyla.network.flow.bytes`     | `transport`                  | hidden                                            |
 | Traces (SQL, Redis)            | `db.query.text`              | hidden                                            |
 
+{{< admonition type="note" >}}
+The `beyla.network.inter.zone.bytes` metric supports the same set of attributes as `beyla.network.flow.bytes`,
+but all of them are hidden by default, except `k8s.cluster.name`, `src.zone` and `dst.zone`.
+{{< /admonition >}}
+
 ## Internal metrics
 
-Beyla can be [configured to report internal metrics]({{< relref "./configure/options.md#internal-metrics-reporter" >}}) in Prometheus Format.
+Beyla can be [configured to report internal metrics]({{< relref "./configure/internal-metrics-reporter.md" >}}) in Prometheus Format.
 
 | Name                                  | Type        | Description                                                                              |
 | ------------------------------------- | ----------- | ---------------------------------------------------------------------------------------- |
@@ -127,4 +137,4 @@ Beyla can be [configured to report internal metrics]({{< relref "./configure/opt
 | `beyla_otel_trace_export_errors_total` | CounterVec | Error count on each failed OTEL trace export, by error type                              |
 | `beyla_prometheus_http_requests_total` | CounterVec | Number of requests towards the Prometheus Scrape endpoint, faceted by HTTP port and path |
 | `beyla_instrumented_processes`        | GaugeVec    | Instrumented processes by Beyla, with process name                                       |
-| `beyla_build_info`                    | GaugeVec    | Version information of the Beyla binary, including the build time and commit hash        |
+| `beyla_internal_build_info`                    | GaugeVec    | Version information of the Beyla binary, including the build time and commit hash        |

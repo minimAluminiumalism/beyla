@@ -15,9 +15,10 @@ import (
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 
-	"github.com/grafana/beyla/test/integration/components/jaeger"
-	"github.com/grafana/beyla/test/integration/components/kube"
-	k8s "github.com/grafana/beyla/test/integration/k8s/common"
+	"github.com/grafana/beyla/v2/test/integration/components/jaeger"
+	"github.com/grafana/beyla/v2/test/integration/components/kube"
+	k8s "github.com/grafana/beyla/v2/test/integration/k8s/common"
+	"github.com/grafana/beyla/v2/test/integration/k8s/common/testpath"
 )
 
 // For the DaemonSet scenario, we only check that Beyla is able to instrument any
@@ -34,7 +35,7 @@ func TestPythonBasicTracing(t *testing.T) {
 					require.NoError(t, err)
 					require.Equal(t, http.StatusOK, resp.StatusCode)
 
-					resp, err = http.Get(jaegerQueryURL + "?service=pytestserver&operation=GET%20%2Fgreeting")
+					resp, err = http.Get(jaegerQueryURL + "?service=mypythonapp&operation=GET%20%2Fgreeting")
 					require.NoError(t, err)
 					if resp == nil {
 						return
@@ -51,20 +52,23 @@ func TestPythonBasicTracing(t *testing.T) {
 					res := trace.FindByOperationName("GET /greeting")
 					require.Len(t, res, 1)
 					parent := res[0]
-					sd := jaeger.Diff([]jaeger.Tag{
-						{Key: "service.namespace", Type: "string", Value: "integration-test"},
-						{Key: "telemetry.sdk.language", Type: "string", Value: "python"},
+					sd := jaeger.DiffAsRegexp([]jaeger.Tag{
+						{Key: "service.namespace", Type: "string", Value: "^integration-test$"},
+						{Key: "telemetry.sdk.language", Type: "string", Value: "^python$"},
+						{Key: "service.instance.id", Type: "string", Value: "^default\\.pytestserver-.+\\.pytestserver$"},
 					}, trace.Processes[parent.ProcessID].Tags)
 					require.Empty(t, sd, sd.String())
 
 					// check the process information
 					sd = jaeger.DiffAsRegexp([]jaeger.Tag{
 						{Key: "k8s.pod.name", Type: "string", Value: "^pytestserver-.*"},
+						{Key: "k8s.container.name", Type: "string", Value: "pytestserver"},
 						{Key: "k8s.node.name", Type: "string", Value: ".+-control-plane$"},
 						{Key: "k8s.pod.uid", Type: "string", Value: k8s.UUIDRegex},
 						{Key: "k8s.pod.start_time", Type: "string", Value: k8s.TimeRegex},
 						{Key: "k8s.namespace.name", Type: "string", Value: "^default$"},
 						{Key: "k8s.cluster.name", Type: "string", Value: "^beyla$"},
+						{Key: "service.instance.id", Type: "string", Value: "^default\\.pytestserver-.+\\.pytestserver"},
 					}, trace.Processes[parent.ProcessID].Tags)
 					require.Empty(t, sd, sd.String())
 
@@ -77,10 +81,10 @@ func TestPythonBasicTracing(t *testing.T) {
 				}, test.Interval(100*time.Millisecond))
 
 				// Let's take down our services, keeping Beyla alive and then redeploy them
-				err := kube.DeleteExistingManifestFile(cfg, k8s.PathManifests+"/05-uninstrumented-service-python.yml")
+				err := kube.DeleteExistingManifestFile(cfg, testpath.Manifests+"/05-uninstrumented-service-python.yml")
 				assert.NoError(t, err, "we should see no error when deleting the uninstrumented service manifest file")
 
-				err = kube.DeployManifestFile(cfg, k8s.PathManifests+"/05-uninstrumented-service-python.yml")
+				err = kube.DeployManifestFile(cfg, testpath.Manifests+"/05-uninstrumented-service-python.yml")
 				assert.NoError(t, err, "we should see no error when re-deploying the uninstrumented service manifest file")
 
 				// We now use /smoke instead of /greeting to ensure we see those APIs after a restart
@@ -89,7 +93,7 @@ func TestPythonBasicTracing(t *testing.T) {
 					require.NoError(t, err)
 					require.Equal(t, http.StatusOK, resp.StatusCode)
 
-					resp, err = http.Get(jaegerQueryURL + "?service=pytestserver&operation=GET%20%2Fsmoke")
+					resp, err = http.Get(jaegerQueryURL + "?service=mypythonapp&operation=GET%20%2Fsmoke")
 					require.NoError(t, err)
 					if resp == nil {
 						return
@@ -106,20 +110,23 @@ func TestPythonBasicTracing(t *testing.T) {
 					res := trace.FindByOperationName("GET /smoke")
 					require.Len(t, res, 1)
 					parent := res[0]
-					sd := jaeger.Diff([]jaeger.Tag{
-						{Key: "service.namespace", Type: "string", Value: "integration-test"},
-						{Key: "telemetry.sdk.language", Type: "string", Value: "python"},
+					sd := jaeger.DiffAsRegexp([]jaeger.Tag{
+						{Key: "service.namespace", Type: "string", Value: "^integration-test$"},
+						{Key: "telemetry.sdk.language", Type: "string", Value: "^python$"},
+						{Key: "service.instance.id", Type: "string", Value: "^default\\.pytestserver-.+\\.pytestserver$"},
 					}, trace.Processes[parent.ProcessID].Tags)
 					require.Empty(t, sd, sd.String())
 
 					// check the process information
 					sd = jaeger.DiffAsRegexp([]jaeger.Tag{
 						{Key: "k8s.pod.name", Type: "string", Value: "^pytestserver-.*"},
+						{Key: "k8s.container.name", Type: "string", Value: "pytestserver"},
 						{Key: "k8s.node.name", Type: "string", Value: ".+-control-plane$"},
 						{Key: "k8s.pod.uid", Type: "string", Value: k8s.UUIDRegex},
 						{Key: "k8s.pod.start_time", Type: "string", Value: k8s.TimeRegex},
 						{Key: "k8s.namespace.name", Type: "string", Value: "^default$"},
 						{Key: "k8s.cluster.name", Type: "string", Value: "^beyla$"},
+						{Key: "service.instance.id", Type: "string", Value: "^default\\.pytestserver-.+\\.pytestserver"},
 					}, trace.Processes[parent.ProcessID].Tags)
 					require.Empty(t, sd, sd.String())
 

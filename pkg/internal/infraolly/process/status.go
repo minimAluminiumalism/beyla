@@ -7,9 +7,9 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 func pslog() *slog.Logger {
@@ -17,7 +17,7 @@ func pslog() *slog.Logger {
 }
 
 type ID struct {
-	Service *svc.ID
+	Service *svc.Attrs
 
 	// UID for a process. Even if the Service field has its own UID,
 	// a service might have multiple processes, so Application and Process
@@ -73,11 +73,15 @@ type Status struct {
 	NetRcvBytesDelta int64
 }
 
-func NewStatus(pid int32, svcID *svc.ID) *Status {
+func NewStatus(pid int32, svcID *svc.Attrs) *Status {
 	return &Status{ID: ID{
 		ProcessID: pid,
 		Service:   svcID,
-		UID:       svcID.UID + svc.UID("-"+strconv.Itoa(int(pid))),
+		UID: svc.UID{
+			Name:      svcID.UID.Name,
+			Namespace: svcID.UID.Namespace,
+			Instance:  svcID.UID.Instance + ":" + strconv.Itoa(int(pid)),
+		},
 	}}
 }
 
@@ -87,7 +91,7 @@ func NewStatus(pid int32, svcID *svc.ID) *Status {
 func OTELGetters(name attr.Name) (attributes.Getter[*Status, attribute.KeyValue], bool) {
 	var g attributes.Getter[*Status, attribute.KeyValue]
 	switch name {
-	case attr.ProcCPUState, attr.ProcDiskIODir, attr.ProcNetIODir:
+	case attr.ProcCPUMode, attr.ProcDiskIODir, attr.ProcNetIODir:
 		// the attributes are handled explicitly by the OTEL exporter, but we need to
 		// ignore them to avoid that the default case tries to report them from service metadata
 	}
@@ -116,9 +120,13 @@ func PromGetters(name attr.Name) (attributes.Getter[*Status, string], bool) {
 		g = func(s *Status) string { return strconv.Itoa(int(s.ID.ParentProcessID)) }
 	case attr.ProcPid:
 		g = func(s *Status) string { return strconv.Itoa(int(s.ID.ProcessID)) }
-	case attr.ProcCPUState, attr.ProcDiskIODir, attr.ProcNetIODir:
+	case attr.ProcCPUMode, attr.ProcDiskIODir, attr.ProcNetIODir:
 		// the attributes are handled explicitly by the prometheus exporter, but we need to
 		// ignore them to avoid that the default case tries to report them from service metadata
+	case attr.Instance:
+		g = func(s *Status) string { return s.ID.UID.Instance }
+	case attr.Job:
+		g = func(s *Status) string { return s.ID.Service.Job() }
 	default:
 		g = func(s *Status) string { return s.ID.Service.Metadata[name] }
 	}

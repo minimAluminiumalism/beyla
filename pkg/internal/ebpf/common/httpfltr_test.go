@@ -9,11 +9,11 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
-const bufSize = 160
+const bufSize = 256
 
 func TestURL(t *testing.T) {
 	event := BPFHTTPInfo{
@@ -87,7 +87,7 @@ func TestCstr(t *testing.T) {
 }
 
 func TestToRequestTrace(t *testing.T) {
-	fltr := TestPidsFilter{services: map[uint32]svc.ID{}}
+	fltr := TestPidsFilter{services: map[uint32]svc.Attrs{}}
 
 	var record BPFHTTPInfo
 	record.Type = 1
@@ -117,13 +117,14 @@ func TestToRequestTrace(t *testing.T) {
 		Start:        123456,
 		End:          789012,
 		HostPort:     1,
-		ServiceID:    svc.ID{},
+		Service:      svc.Attrs{},
+		Statement:    "http;",
 	}
 	assert.Equal(t, expected, result)
 }
 
 func TestToRequestTraceNoConnection(t *testing.T) {
-	fltr := TestPidsFilter{services: map[uint32]svc.ID{}}
+	fltr := TestPidsFilter{services: map[uint32]svc.Attrs{}}
 
 	var record BPFHTTPInfo
 	record.Type = 1
@@ -153,13 +154,14 @@ func TestToRequestTraceNoConnection(t *testing.T) {
 		End:          789012,
 		Status:       200,
 		HostPort:     7033,
-		ServiceID:    svc.ID{},
+		Service:      svc.Attrs{},
+		Statement:    "http;localhost",
 	}
 	assert.Equal(t, expected, result)
 }
 
 func TestToRequestTrace_BadHost(t *testing.T) {
-	fltr := TestPidsFilter{services: map[uint32]svc.ID{}}
+	fltr := TestPidsFilter{services: map[uint32]svc.Attrs{}}
 
 	var record BPFHTTPInfo
 	record.Type = 1
@@ -190,13 +192,14 @@ func TestToRequestTrace_BadHost(t *testing.T) {
 		Start:        123456,
 		End:          789012,
 		HostPort:     0,
-		ServiceID:    svc.ID{},
+		Service:      svc.Attrs{},
+		Statement:    "http;example.c",
 	}
 	assert.Equal(t, expected, result)
 
 	s, p := record.hostFromBuf()
-	assert.Equal(t, s, "")
-	assert.Equal(t, p, -1)
+	assert.Equal(t, "example.c", s)
+	assert.Equal(t, -1, p)
 
 	var record1 BPFHTTPInfo
 	copy(record1.Buf[:], "GET /hello HTTP/1.1\r\nHost: example.c:23")

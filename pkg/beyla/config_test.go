@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"regexp"
 	"strings"
@@ -14,18 +15,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/export/debug"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/export/otel"
-	"github.com/grafana/beyla/pkg/export/prom"
-	ebpfcommon "github.com/grafana/beyla/pkg/internal/ebpf/common"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/infraolly/process"
-	"github.com/grafana/beyla/pkg/internal/netolly/transform/cidr"
-	"github.com/grafana/beyla/pkg/internal/traces"
-	"github.com/grafana/beyla/pkg/kubeflags"
-	"github.com/grafana/beyla/pkg/transform"
+	"github.com/grafana/beyla/v2/pkg/config"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/debug"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/export/prom"
+	"github.com/grafana/beyla/v2/pkg/internal/ebpf/tcmanager"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/infraolly/process"
+	"github.com/grafana/beyla/v2/pkg/internal/kube"
+	"github.com/grafana/beyla/v2/pkg/internal/netolly/transform/cidr"
+	"github.com/grafana/beyla/v2/pkg/internal/traces"
+	"github.com/grafana/beyla/v2/pkg/kubeflags"
+	"github.com/grafana/beyla/v2/pkg/services"
+	"github.com/grafana/beyla/v2/pkg/transform"
 )
 
 type envMap map[string]string
@@ -52,6 +56,8 @@ attributes:
     kubeconfig_path: /foo/bar
     enable: true
     informers_sync_timeout: 30s
+    resource_labels:
+      service.namespace: ["huha.com/yeah"]
   instance_id:
     dns: true
   host_id:
@@ -100,21 +106,23 @@ network:
 	nc.AgentIP = "1.2.3.4"
 	nc.CIDRs = cidr.Definitions{"10.244.0.0/16"}
 
+	metaSources := maps.Clone(kube.DefaultResourceLabels)
+	metaSources["service.namespace"] = []string{"huha.com/yeah"}
+
 	assert.Equal(t, &Config{
 		Exec:             cfg.Exec,
 		Port:             cfg.Port,
 		ServiceName:      "svc-name",
 		ChannelBufferLen: 33,
 		LogLevel:         "INFO",
-		EnforceSysCaps:   true,
-		Printer:          false,
+		EnforceSysCaps:   false,
 		TracePrinter:     "json",
-		EBPF: ebpfcommon.TracerConfig{
-			BatchLength:        100,
-			BatchTimeout:       time.Second,
-			BpfBaseDir:         "/var/run/beyla",
-			BpfPath:            DefaultConfig.EBPF.BpfPath,
-			HTTPRequestTimeout: 30 * time.Second,
+		EBPF: config.EBPFTracer{
+			BatchLength:               100,
+			BatchTimeout:              time.Second,
+			HTTPRequestTimeout:        30 * time.Second,
+			TCBackend:                 tcmanager.TCBackendAuto,
+			ContextPropagationEnabled: false,
 		},
 		Grafana: otel.GrafanaConfig{
 			OTLP: otel.GrafanaOTLP{
@@ -123,7 +131,7 @@ network:
 		},
 		NetworkFlows: nc,
 		Metrics: otel.MetricsConfig{
-			Interval:          5 * time.Second,
+			OTELIntervalMS:    60_000,
 			CommonEndpoint:    "localhost:3131",
 			MetricsEndpoint:   "localhost:3030",
 			Protocol:          otel.ProtocolUnset,
@@ -137,7 +145,7 @@ network:
 				instrumentations.InstrumentationALL,
 			},
 			HistogramAggregation: "base2_exponential_bucket_histogram",
-			TTL:                  defaultMetricsTTL,
+			TTL:                  5 * time.Minute,
 		},
 		Traces: otel.TracesConfig{
 			Protocol:           otel.ProtocolUnset,
@@ -163,6 +171,7 @@ network:
 				RequestSizeHistogram: []float64{0, 10, 20, 22},
 			}},
 		InternalMetrics: imetrics.Config{
+			Exporter: imetrics.InternalMetricsExporterDisabled,
 			Prometheus: imetrics.PrometheusConfig{
 				Port: 3210,
 				Path: "/internal/metrics",
@@ -173,9 +182,11 @@ network:
 				HostnameDNSResolution: true,
 			},
 			Kubernetes: transform.KubernetesDecorator{
-				KubeconfigPath:       "/foo/bar",
-				Enable:               kubeflags.EnabledTrue,
-				InformersSyncTimeout: 30 * time.Second,
+				KubeconfigPath:        "/foo/bar",
+				Enable:                kubeflags.EnabledTrue,
+				InformersSyncTimeout:  30 * time.Second,
+				InformersResyncPeriod: 30 * time.Minute,
+				ResourceLabels:        metaSources,
 			},
 			HostID: HostIDConfig{
 				Override:     "the-host-id",
@@ -189,7 +200,8 @@ network:
 			},
 		},
 		Routes: &transform.RoutesConfig{
-			Unmatch: transform.UnmatchHeuristic,
+			Unmatch:      transform.UnmatchHeuristic,
+			WildcardChar: "*",
 		},
 		NameResolver: &transform.NameResolverConfig{
 			Sources:  []string{"k8s", "dns"},
@@ -199,6 +211,14 @@ network:
 		Processes: process.CollectConfig{
 			RunMode:  process.RunModePrivileged,
 			Interval: 5 * time.Second,
+		},
+		Discovery: services.DiscoveryConfig{
+			ExcludeOTelInstrumentedServices: true,
+			DefaultExcludeServices: services.DefinitionCriteria{
+				services.Attributes{
+					Path: services.NewPathRegexp(regexp.MustCompile("(?:^|/)(beyla$|alloy$|otelcol[^/]*$)")),
+				},
+			},
 		},
 	}, cfg)
 }
@@ -217,15 +237,12 @@ func TestConfigValidate(t *testing.T) {
 		{"OTEL_EXPORTER_OTLP_ENDPOINT": "localhost:1234", "BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar"},
 		{"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "localhost:1234", "BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar"},
 		{"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "localhost:1234", "BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar"},
-		{"BEYLA_PRINT_TRACES": "true", "BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar"},
-		{"BEYLA_PRINT_TRACES": "true", "BEYLA_TRACE_PRINTER": "disabled", "BEYLA_EXECUTABLE_NAME": "foo"},
-		{"BEYLA_PRINT_TRACES": "true", "BEYLA_TRACE_PRINTER": "", "BEYLA_EXECUTABLE_NAME": "foo"},
-		{"BEYLA_PRINT_TRACES": "false", "BEYLA_TRACE_PRINTER": "text", "BEYLA_EXECUTABLE_NAME": "foo"},
 		{"BEYLA_TRACE_PRINTER": "text", "BEYLA_EXECUTABLE_NAME": "foo"},
 		{"BEYLA_TRACE_PRINTER": "json", "BEYLA_EXECUTABLE_NAME": "foo"},
 		{"BEYLA_TRACE_PRINTER": "json_indent", "BEYLA_EXECUTABLE_NAME": "foo"},
 		{"BEYLA_TRACE_PRINTER": "counter", "BEYLA_EXECUTABLE_NAME": "foo"},
 		{"BEYLA_PROMETHEUS_PORT": "8080", "BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar"},
+		{"BEYLA_INTERNAL_OTEL_METRICS": "true", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": "localhost:1234", "BEYLA_EXECUTABLE_NAME": "foo"},
 	}
 	for n, tc := range testCases {
 		t.Run(fmt.Sprint("case", n), func(t *testing.T) {
@@ -238,11 +255,9 @@ func TestConfigValidate(t *testing.T) {
 func TestConfigValidate_error(t *testing.T) {
 	testCases := []envMap{
 		{"OTEL_EXPORTER_OTLP_ENDPOINT": "localhost:1234", "INSTRUMENT_FUNC_NAME": "bar"},
-		{"BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar", "BEYLA_PRINT_TRACES": "false"},
-		{"BEYLA_EXECUTABLE_NAME": "foo", "BEYLA_PRINT_TRACES": "true", "BEYLA_TRACE_PRINTER": "text"},
-		{"BEYLA_EXECUTABLE_NAME": "foo", "BEYLA_PRINT_TRACES": "true", "BEYLA_TRACE_PRINTER": "json"},
-		{"BEYLA_EXECUTABLE_NAME": "foo", "BEYLA_PRINT_TRACES": "true", "BEYLA_TRACE_PRINTER": "json_indent"},
-		{"BEYLA_EXECUTABLE_NAME": "foo", "BEYLA_PRINT_TRACES": "true", "BEYLA_TRACE_PRINTER": "counter"},
+		{"BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar", "BEYLA_TRACE_PRINTER": "disabled"},
+		{"BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar", "BEYLA_TRACE_PRINTER": ""},
+		{"BEYLA_EXECUTABLE_NAME": "foo", "INSTRUMENT_FUNC_NAME": "bar", "BEYLA_TRACE_PRINTER": "invalid"},
 	}
 	for n, tc := range testCases {
 		t.Run(fmt.Sprint("case", n), func(t *testing.T) {
@@ -319,10 +334,6 @@ func TestConfigValidate_TracePrinter(t *testing.T) {
 			errorMsg: "invalid value for trace_printer: 'invalid_printer'",
 		},
 		{
-			env:      envMap{"BEYLA_EXECUTABLE_NAME": "foo", "BEYLA_TRACE_PRINTER": "json", "BEYLA_PRINT_TRACES": "true"},
-			errorMsg: "print_traces and trace_printer are mutually exclusive, use trace_printer instead",
-		},
-		{
 			env:      envMap{"BEYLA_EXECUTABLE_NAME": "foo"},
 			errorMsg: "you need to define at least one exporter: trace_printer, grafana, otel_metrics_export, otel_traces_export or prometheus_export",
 		},
@@ -339,7 +350,7 @@ func TestConfigValidate_TracePrinter(t *testing.T) {
 }
 
 func TestConfigValidate_TracePrinterFallback(t *testing.T) {
-	env := envMap{"BEYLA_EXECUTABLE_NAME": "foo", "BEYLA_PRINT_TRACES": "true"}
+	env := envMap{"BEYLA_EXECUTABLE_NAME": "foo", "BEYLA_TRACE_PRINTER": "text"}
 
 	cfg := loadConfig(t, env)
 
@@ -347,8 +358,43 @@ func TestConfigValidate_TracePrinterFallback(t *testing.T) {
 
 	err := cfg.Validate()
 	require.NoError(t, err)
-	assert.True(t, cfg.Printer.Enabled())
 	assert.Equal(t, cfg.TracePrinter, debug.TracePrinterText)
+}
+
+func TestConfigValidateRoutes(t *testing.T) {
+	userConfig := bytes.NewBufferString(`executable_name: foo
+trace_printer: text
+routes:
+  unmatched: heuristic
+  wildcard_char: "*"
+`)
+	cfg, err := LoadConfig(userConfig)
+	require.NoError(t, err)
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfigValidateRoutes_Errors(t *testing.T) {
+	for _, tc := range []string{
+		`executable_name: foo
+trace_printer: text
+routes:
+  unmatched: heuristic
+  wildcard_char: "##"
+`, `executable_name: foo
+trace_printer: text
+routes:
+  unmatched: heuristic
+  wildcard_char: "random"
+`,
+	} {
+		testCaseName := regexp.MustCompile("wildcard_char: (.+)\n").FindStringSubmatch(tc)[1]
+		t.Run(testCaseName, func(t *testing.T) {
+			userConfig := bytes.NewBufferString(tc)
+			cfg, err := LoadConfig(userConfig)
+			require.NoError(t, err)
+			require.Error(t, cfg.Validate())
+		})
+	}
 }
 
 func TestConfig_OtelGoAutoEnv(t *testing.T) {
@@ -386,7 +432,7 @@ func TestConfig_ExternalLogger(t *testing.T) {
 		handler       func(out io.Writer) slog.Handler
 		expectedText  *regexp.Regexp
 		expectedCfg   Config
-		tracing       bool
+		debugMode     bool
 		networkEnable bool
 	}
 	for _, tc := range []testCase{{
@@ -404,10 +450,10 @@ func TestConfig_ExternalLogger(t *testing.T) {
 		expectedText: regexp.MustCompile(
 			`^time=\S+ level=INFO msg=information arg=info
 time=\S+ level=DEBUG msg=debug arg=debug$`),
-		tracing: true,
+		debugMode: true,
 		expectedCfg: Config{
 			TracePrinter: debug.TracePrinterText,
-			EBPF:         ebpfcommon.TracerConfig{BpfDebug: true},
+			EBPF:         config.EBPFTracer{BpfDebug: true, ProtocolDebug: true},
 		},
 	}, {
 		name: "debug log with network flows",
@@ -418,23 +464,62 @@ time=\S+ level=DEBUG msg=debug arg=debug$`),
 		expectedText: regexp.MustCompile(
 			`^time=\S+ level=INFO msg=information arg=info
 time=\S+ level=DEBUG msg=debug arg=debug$`),
-		tracing: true,
+		debugMode: true,
 		expectedCfg: Config{
 			TracePrinter: debug.TracePrinterText,
-			EBPF:         ebpfcommon.TracerConfig{BpfDebug: true},
+			EBPF:         config.EBPFTracer{BpfDebug: true, ProtocolDebug: true},
 			NetworkFlows: NetworkConfig{Enable: true, Print: true},
 		},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Config{NetworkFlows: NetworkConfig{Enable: tc.networkEnable}}
 			out := &bytes.Buffer{}
-			cfg.ExternalLogger(tc.handler(out), tc.tracing)
+			cfg.ExternalLogger(tc.handler(out), tc.debugMode)
 			slog.Info("information", "arg", "info")
 			slog.Debug("debug", "arg", "debug")
 			assert.Regexp(t, tc.expectedText, strings.TrimSpace(out.String()))
 			assert.Equal(t, tc.expectedCfg, cfg)
 		})
 	}
+}
+
+func TestDefaultExclusionFilter(t *testing.T) {
+	c := DefaultConfig.Discovery.DefaultExcludeServices
+
+	assert.True(t, c[0].Path.MatchString("beyla"))
+	assert.True(t, c[0].Path.MatchString("alloy"))
+	assert.True(t, c[0].Path.MatchString("otelcol-contrib"))
+
+	assert.False(t, c[0].Path.MatchString("/usr/bin/beyla/test"))
+	assert.False(t, c[0].Path.MatchString("/usr/bin/alloy/test"))
+	assert.False(t, c[0].Path.MatchString("/usr/bin/otelcol-contrib/test"))
+
+	assert.True(t, c[0].Path.MatchString("/beyla"))
+	assert.True(t, c[0].Path.MatchString("/alloy"))
+	assert.True(t, c[0].Path.MatchString("/otelcol-contrib"))
+
+	assert.True(t, c[0].Path.MatchString("/usr/bin/beyla"))
+	assert.True(t, c[0].Path.MatchString("/usr/bin/alloy"))
+	assert.True(t, c[0].Path.MatchString("/usr/bin/otelcol-contrib"))
+	assert.True(t, c[0].Path.MatchString("/usr/bin/otelcol-contrib123"))
+}
+
+func TestWillUseTC(t *testing.T) {
+	env := envMap{"BEYLA_BPF_ENABLE_CONTEXT_PROPAGATION": "true"}
+	cfg := loadConfig(t, env)
+	assert.True(t, cfg.willUseTC())
+
+	env = envMap{"BEYLA_BPF_ENABLE_CONTEXT_PROPAGATION": "false"}
+	cfg = loadConfig(t, env)
+	assert.False(t, cfg.willUseTC())
+
+	env = envMap{"BEYLA_BPF_ENABLE_CONTEXT_PROPAGATION": "false", "BEYLA_NETWORK_METRICS": "true"}
+	cfg = loadConfig(t, env)
+	assert.False(t, cfg.willUseTC())
+
+	env = envMap{"BEYLA_BPF_ENABLE_CONTEXT_PROPAGATION": "false", "BEYLA_NETWORK_SOURCE": "tc", "BEYLA_NETWORK_METRICS": "true"}
+	cfg = loadConfig(t, env)
+	assert.True(t, cfg.willUseTC())
 }
 
 func loadConfig(t *testing.T, env envMap) *Config {

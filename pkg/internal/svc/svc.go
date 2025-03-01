@@ -3,13 +3,13 @@ package svc
 import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.25.0"
 
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
 )
 
 type InstrumentableType int
 
 const (
-	InstrumentableGolang = InstrumentableType(iota)
+	InstrumentableGolang InstrumentableType = iota + 1
 	InstrumentableJava
 	InstrumentableDotnet
 	InstrumentablePython
@@ -41,30 +41,34 @@ func (it InstrumentableType) String() string {
 	case InstrumentableGeneric:
 		return "generic"
 	default:
-		return "unknown(bug!)"
+		// if this appears, it's a bug!!
+		return "unknown"
 	}
 }
 
-// UID uniquely identifies a service instance
-type UID string
+type idFlags uint8
 
-// ID stores the metadata attributes of a service/resource
-// TODO: rename to svc.Attributes
-type ID struct {
-	// UID might coincide with other fields (usually, Instance), but UID
-	// can't be overriden by the user, so it's the only field that can be
-	// used for internal differentiation of the users.
-	// UID is not exported in the metrics or traces.
+const (
+	autoName           idFlags = 0x1
+	exportsOTelMetrics idFlags = 0x2
+	exportsOTelTraces  idFlags = 0x4
+)
+
+// UID uniquely identifies a service instance across the whole system
+// according to the OpenTelemetry specification: (name, namespace, instance)
+type UID struct {
+	Name      string
+	Namespace string
+	Instance  string
+}
+
+// Attrs stores the metadata attributes of a service/resource
+type Attrs struct {
+	// Instance uniquely identifies a service instance. It is not exported
+	// in the metrics or traces, but it is used to compose the Instance
 	UID UID
 
-	Name string
-	// AutoName is true if the Name has been automatically set by Beyla (e.g. executable name when
-	// the Name is empty). This will allow later refinement of the Name value (e.g. to override it
-	// again with Kubernetes metadata).
-	AutoName    bool
-	Namespace   string
 	SDKLanguage InstrumentableType
-	Instance    string
 
 	Metadata map[attr.Name]string
 
@@ -76,15 +80,55 @@ type ID struct {
 	// HostName running the process. It will default to the Beyla host and will be overridden
 	// by other metadata if available (e.g., Pod Name, Node Name, etc...)
 	HostName string
+
+	EnvVars map[string]string
+
+	flags idFlags
 }
 
-func (i *ID) GetUID() UID {
+func (i *Attrs) GetUID() UID {
 	return i.UID
 }
 
-func (i *ID) String() string {
-	if i.Namespace != "" {
-		return i.Namespace + "/" + i.Name
+func (i *Attrs) String() string {
+	return i.Job()
+}
+
+func (i *Attrs) Job() string {
+	if i.UID.Namespace != "" {
+		return i.UID.Namespace + "/" + i.UID.Name
 	}
-	return i.Name
+	return i.UID.Name
+}
+
+func (i *Attrs) setFlag(flag idFlags) {
+	i.flags |= flag
+}
+
+func (i *Attrs) getFlag(flag idFlags) bool {
+	return (i.flags & flag) == flag
+}
+
+func (i *Attrs) SetAutoName() {
+	i.setFlag(autoName)
+}
+
+func (i *Attrs) AutoName() bool {
+	return i.getFlag(autoName)
+}
+
+func (i *Attrs) SetExportsOTelMetrics() {
+	i.setFlag(exportsOTelMetrics)
+}
+
+func (i *Attrs) ExportsOTelMetrics() bool {
+	return i.getFlag(exportsOTelMetrics)
+}
+
+func (i *Attrs) SetExportsOTelTraces() {
+	i.setFlag(exportsOTelTraces)
+}
+
+func (i *Attrs) ExportsOTelTraces() bool {
+	return i.getFlag(exportsOTelTraces)
 }

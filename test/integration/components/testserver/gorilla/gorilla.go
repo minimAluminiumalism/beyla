@@ -7,7 +7,7 @@ import (
 
 	"github.com/gorilla/mux"
 
-	"github.com/grafana/beyla/test/integration/components/testserver/std"
+	"github.com/grafana/beyla/v2/test/integration/components/testserver/std"
 )
 
 func Setup(port, stdPort int) {
@@ -18,5 +18,5 @@ func Setup(port, stdPort int) {
 	address := fmt.Sprintf(":%d", port)
 	log.Info("starting HTTP server", "address", address)
 	err := http.ListenAndServe(address, r)
-	log.Error("HTTP server has unexpectedly stopped", err)
+	log.Error("HTTP server has unexpectedly stopped", "error", err)
 }

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	"github.com/hashicorp/golang-lru/v2/simplelru"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -17,11 +17,14 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.19.0"
 	"google.golang.org/grpc/credentials"
 
-	"github.com/grafana/beyla/pkg/export/expire"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/buildinfo"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/expire"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 // Protocol values for the OTEL_EXPORTER_OTLP_PROTOCOL, OTEL_EXPORTER_OTLP_TRACES_PROTOCOL and
@@ -42,6 +45,7 @@ const (
 	envProtocol        = "OTEL_EXPORTER_OTLP_PROTOCOL"
 	envHeaders         = "OTEL_EXPORTER_OTLP_HEADERS"
 	envTracesHeaders   = "OTEL_EXPORTER_OTLP_TRACES_HEADERS"
+	envMetricsHeaders  = "OTEL_EXPORTER_OTLP_METRICS_HEADERS"
 	envResourceAttrs   = "OTEL_RESOURCE_ATTRIBUTES"
 )
 
@@ -60,15 +64,15 @@ var DefaultBuckets = Buckets{
 	RequestSizeHistogram: []float64{0, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192},
 }
 
-func getAppResourceAttrs(hostID string, service *svc.ID) []attribute.KeyValue {
+func getAppResourceAttrs(hostID string, service *svc.Attrs) []attribute.KeyValue {
 	return append(getResourceAttrs(hostID, service),
-		semconv.ServiceInstanceID(service.Instance),
+		semconv.ServiceInstanceID(service.UID.Instance),
 	)
 }
 
-func getResourceAttrs(hostID string, service *svc.ID) []attribute.KeyValue {
+func getResourceAttrs(hostID string, service *svc.Attrs) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
-		semconv.ServiceName(service.Name),
+		semconv.ServiceName(service.UID.Name),
 		// SpanMetrics requires an extra attribute besides service name
 		// to generate the traces_target_info metric,
 		// so the service is visible in the ServicesList
@@ -76,18 +80,32 @@ func getResourceAttrs(hostID string, service *svc.ID) []attribute.KeyValue {
 		semconv.TelemetrySDKLanguageKey.String(service.SDKLanguage.String()),
 		// We set the SDK name as Beyla, so we can distinguish beyla generated metrics from other SDKs
 		semconv.TelemetrySDKNameKey.String("beyla"),
+		semconv.TelemetrySDKVersion(buildinfo.Version),
 		semconv.HostName(service.HostName),
 		semconv.HostID(hostID),
 	}
 
-	if service.Namespace != "" {
-		attrs = append(attrs, semconv.ServiceNamespace(service.Namespace))
+	if service.UID.Namespace != "" {
+		attrs = append(attrs, semconv.ServiceNamespace(service.UID.Namespace))
 	}
 
 	for k, v := range service.Metadata {
 		attrs = append(attrs, k.OTEL().String(v))
 	}
 	return attrs
+}
+
+func newResourceInternal(hostID string) *resource.Resource {
+	attrs := []attribute.KeyValue{
+		semconv.ServiceName("beyla"),
+		semconv.ServiceInstanceID(uuid.New().String()),
+		semconv.TelemetrySDKLanguageKey.String(semconv.TelemetrySDKLanguageGo.Value.AsString()),
+		// We set the SDK name as Beyla, so we can distinguish beyla generated metrics from other SDKs
+		semconv.TelemetrySDKNameKey.String("beyla"),
+		semconv.HostID(hostID),
+	}
+
+	return resource.NewWithAttributes(semconv.SchemaURL, attrs...)
 }
 
 // ReporterPool keeps an LRU cache of different OTEL reporters given a service name.
@@ -142,6 +160,8 @@ func NewReporterPool[K uidGetter, T any](
 	}
 }
 
+var emptyUID = svc.UID{}
+
 // For retrieves the associated item for the given service name, or
 // creates a new one if it does not exist
 func (rp *ReporterPool[K, T]) For(service K) (T, error) {
@@ -154,7 +174,7 @@ func (rp *ReporterPool[K, T]) For(service K) (T, error) {
 	// In multi-process tracing, this is likely to happen as most
 	// tracers group traces belonging to the same service in the same slice.
 	svcUID := service.GetUID()
-	if rp.lastServiceUID == "" || svcUID != rp.lastService.GetUID() {
+	if rp.lastServiceUID == emptyUID || svcUID != rp.lastService.GetUID() {
 		lm, err := rp.get(svcUID, service)
 		if err != nil {
 			var t T
@@ -210,7 +230,7 @@ type otlpOptions struct {
 	BaseURLPath   string
 	URLPath       string
 	SkipTLSVerify bool
-	HTTPHeaders   map[string]string
+	Headers       map[string]string
 }
 
 func (o *otlpOptions) AsMetricHTTP() []otlpmetrichttp.Option {
@@ -226,8 +246,8 @@ func (o *otlpOptions) AsMetricHTTP() []otlpmetrichttp.Option {
 	if o.SkipTLSVerify {
 		opts = append(opts, otlpmetrichttp.WithTLSClientConfig(&tls.Config{InsecureSkipVerify: true}))
 	}
-	if len(o.HTTPHeaders) > 0 {
-		opts = append(opts, otlpmetrichttp.WithHeaders(o.HTTPHeaders))
+	if len(o.Headers) > 0 {
+		opts = append(opts, otlpmetrichttp.WithHeaders(o.Headers))
 	}
 	return opts
 }
@@ -241,6 +261,9 @@ func (o *otlpOptions) AsMetricGRPC() []otlpmetricgrpc.Option {
 	}
 	if o.SkipTLSVerify {
 		opts = append(opts, otlpmetricgrpc.WithTLSCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true})))
+	}
+	if len(o.Headers) > 0 {
+		opts = append(opts, otlpmetricgrpc.WithHeaders(o.Headers))
 	}
 	return opts
 }
@@ -258,8 +281,8 @@ func (o *otlpOptions) AsTraceHTTP() []otlptracehttp.Option {
 	if o.SkipTLSVerify {
 		opts = append(opts, otlptracehttp.WithTLSClientConfig(&tls.Config{InsecureSkipVerify: true}))
 	}
-	if len(o.HTTPHeaders) > 0 {
-		opts = append(opts, otlptracehttp.WithHeaders(o.HTTPHeaders))
+	if len(o.Headers) > 0 {
+		opts = append(opts, otlptracehttp.WithHeaders(o.Headers))
 	}
 	return opts
 }
@@ -273,6 +296,9 @@ func (o *otlpOptions) AsTraceGRPC() []otlptracegrpc.Option {
 	}
 	if o.SkipTLSVerify {
 		opts = append(opts, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(&tls.Config{InsecureSkipVerify: true})))
+	}
+	if len(o.Headers) > 0 {
+		opts = append(opts, otlptracegrpc.WithHeaders(o.Headers))
 	}
 	return opts
 }
@@ -333,58 +359,64 @@ func (l *LogrAdaptor) WithName(name string) logr.LogSink {
 	return &LogrAdaptor{inner: l.inner.With("name", name)}
 }
 
-func headersFromEnv(varName string) map[string]string {
+func HeadersFromEnv(varName string) map[string]string {
 	headers := map[string]string{}
 
 	addToMap := func(k string, v string) {
 		headers[k] = v
 	}
 
-	parseOTELEnvVar(varName, addToMap)
+	parseOTELEnvVar(nil, varName, addToMap)
 
 	return headers
 }
-
-type varHandler func(k string, v string)
 
 // parseOTELEnvVar parses a comma separated group of variables
 // in the format specified by OTEL_EXPORTER_OTLP_*HEADERS or
 // OTEL_RESOURCE_ATTRIBUTES, i.e. a comma-separated list of
 // key=values. For example: api-key=key,other-config-value=value
 // The values are passed as parameters to the handler function
-func parseOTELEnvVar(varName string, handler varHandler) {
-	envVar, ok := os.LookupEnv(varName)
+func parseOTELEnvVar(svc *svc.Attrs, varName string, handler attributes.VarHandler) {
+	var envVar string
+	ok := false
+
+	if svc != nil && svc.EnvVars != nil {
+		envVar, ok = svc.EnvVars[varName]
+	}
+
+	if !ok {
+		envVar, ok = os.LookupEnv(varName)
+	}
 
 	if !ok {
 		return
 	}
 
-	// split all the comma-separated key=value entries
-	for _, entry := range strings.Split(envVar, ",") {
-		// split only by the first '=' appearance, as values might
-		// have base64 '=' padding symbols
-		keyVal := strings.SplitN(entry, "=", 2)
-		if len(keyVal) < 2 {
-			continue
-		}
-
-		k := strings.TrimSpace(keyVal[0])
-		v := strings.TrimSpace(keyVal[1])
-
-		if k == "" || v == "" {
-			continue
-		}
-
-		handler(strings.TrimSpace(keyVal[0]), strings.TrimSpace(keyVal[1]))
-	}
+	attributes.ParseOTELResourceVariable(envVar, handler)
 }
 
-func ResourceAttrsFromEnv() []attribute.KeyValue {
+func ResourceAttrsFromEnv(svc *svc.Attrs) []attribute.KeyValue {
 	var otelResourceAttrs []attribute.KeyValue
 	apply := func(k string, v string) {
 		otelResourceAttrs = append(otelResourceAttrs, attribute.String(k, v))
 	}
 
-	parseOTELEnvVar(envResourceAttrs, apply)
+	parseOTELEnvVar(svc, envResourceAttrs, apply)
 	return otelResourceAttrs
+}
+
+func ResolveOTLPEndpoint(endpoint, common string, grafana *GrafanaOTLP) (string, bool) {
+	if endpoint != "" {
+		return endpoint, false
+	}
+
+	if common != "" {
+		return common, true
+	}
+
+	if grafana != nil && grafana.CloudZone != "" && grafana.Endpoint() != "" {
+		return grafana.Endpoint(), true
+	}
+
+	return "", false
 }

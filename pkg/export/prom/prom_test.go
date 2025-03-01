@@ -5,23 +5,27 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/signal"
 	"regexp"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/mariomac/guara/pkg/test"
 	"github.com/mariomac/pipes/pipe"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/export/otel"
-	"github.com/grafana/beyla/pkg/internal/connector"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/internal/connector"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 const timeout = 3 * time.Second
@@ -270,15 +274,15 @@ func TestAppMetrics_ByInstrumentation(t *testing.T) {
 			go exporter(metrics)
 
 			metrics <- []request.Span{
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTPClient, Path: "/bar", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeGRPC, Path: "/foo", RequestStart: 100, End: 200},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeGRPCClient, Path: "/bar", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeSQLClient, Path: "SELECT", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeRedisClient, Method: "SET", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeRedisServer, Method: "GET", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeKafkaClient, Method: "publish", RequestStart: 150, End: 175},
-				{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeKafkaServer, Method: "process", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Path: "/foo", RequestStart: 100, End: 200},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTPClient, Path: "/bar", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeGRPC, Path: "/foo", RequestStart: 100, End: 200},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeGRPCClient, Path: "/bar", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeSQLClient, Path: "SELECT", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeRedisClient, Method: "SET", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeRedisServer, Method: "GET", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeKafkaClient, Method: "publish", RequestStart: 150, End: 175},
+				{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeKafkaServer, Method: "process", RequestStart: 150, End: 175},
 			}
 
 			var exported string
@@ -294,6 +298,115 @@ func TestAppMetrics_ByInstrumentation(t *testing.T) {
 
 		})
 	}
+}
+
+func TestSpanMetricsDiscarded(t *testing.T) {
+	mc := PrometheusConfig{
+		Features: []string{otel.FeatureApplication},
+	}
+	mr := metricsReporter{
+		cfg: &mc,
+	}
+
+	svcNoExport := svc.Attrs{}
+
+	svcExportMetrics := svc.Attrs{}
+	svcExportMetrics.SetExportsOTelMetrics()
+
+	svcExportTraces := svc.Attrs{}
+	svcExportTraces.SetExportsOTelTraces()
+
+	ignoredSpan := request.Span{Service: svcExportTraces, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/v1/traces", RequestStart: 100, End: 200}
+	ignoredSpan.SetIgnoreMetrics()
+
+	tests := []struct {
+		name      string
+		span      request.Span
+		discarded bool
+		filtered  bool
+	}{
+		{
+			name:      "Foo span is not filtered",
+			span:      request.Span{Service: svcNoExport, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
+			discarded: false,
+			filtered:  false,
+		},
+		{
+			name:      "/v1/metrics span is filtered",
+			span:      request.Span{Service: svcExportMetrics, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/v1/metrics", RequestStart: 100, End: 200},
+			discarded: true,
+			filtered:  false,
+		},
+		{
+			name:      "/v1/traces span is filtered because we ignore this span",
+			span:      ignoredSpan,
+			discarded: false,
+			filtered:  true,
+		},
+		{
+			name:      "/v1/traces span is not filtered",
+			span:      request.Span{Service: svcExportTraces, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/v1/traces", RequestStart: 100, End: 200},
+			discarded: false,
+			filtered:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.discarded, !(mr.otelSpanObserved(&tt.span)), tt.name)
+			assert.Equal(t, tt.filtered, mr.otelSpanFiltered(&tt.span), tt.name)
+		})
+	}
+}
+
+func TestTerminatesOnBadPromPort(t *testing.T) {
+	now := syncedClock{now: time.Now()}
+	timeNow = now.Now
+
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	defer cancelCtx()
+	openPort, err := test.FreeTCPPort()
+	require.NoError(t, err)
+
+	// Grab the port we just allocated for something else
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Hello, %v, http: %v\n", r.URL.Path, r.TLS == nil)
+	})
+	server := http.Server{Addr: fmt.Sprintf(":%d", openPort), Handler: handler}
+	serverUp := make(chan bool, 1)
+
+	go func() {
+		go func() {
+			time.Sleep(5 * time.Second)
+			serverUp <- true
+		}()
+		err := server.ListenAndServe()
+		fmt.Printf("Terminating server %v\n", err)
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT)
+
+	pm := connector.PrometheusManager{}
+
+	c := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: TracesTargetInfo,
+		Help: "target service information in trace span metric format",
+	}, []string{"a"}).MetricVec
+
+	pm.Register(openPort, "/metrics", c)
+	go pm.StartHTTP(ctx)
+
+	ok := false
+	select {
+	case sig := <-sigChan:
+		assert.Equal(t, sig, syscall.SIGINT)
+		ok = true
+	case <-time.After(5 * time.Second):
+		ok = false
+	}
+
+	assert.True(t, ok)
 }
 
 var mmux = sync.Mutex{}

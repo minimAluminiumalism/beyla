@@ -7,8 +7,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.19.0"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
 )
 
 // SpanOTELGetters returns the attributes.Getter function that returns the
@@ -22,7 +22,7 @@ func SpanOTELGetters(name attr.Name) (attributes.Getter[*Span, attribute.KeyValu
 	case attr.ClientNamespace:
 		getter = func(s *Span) attribute.KeyValue {
 			if s.IsClientSpan() {
-				return ClientNamespaceMetric(s.ServiceID.Namespace)
+				return ClientNamespaceMetric(s.Service.UID.Namespace)
 			}
 			return ClientNamespaceMetric(s.OtherNamespace)
 		}
@@ -35,9 +35,14 @@ func SpanOTELGetters(name attr.Name) (attributes.Getter[*Span, attribute.KeyValu
 	case attr.HTTPUrlPath:
 		getter = func(s *Span) attribute.KeyValue { return HTTPUrlPath(s.Path) }
 	case attr.ClientAddr:
-		getter = func(s *Span) attribute.KeyValue { return ClientAddr(SpanPeer(s)) }
+		getter = func(s *Span) attribute.KeyValue { return ClientAddr(PeerAsClient(s)) }
 	case attr.ServerAddr:
-		getter = func(s *Span) attribute.KeyValue { return ServerAddr(SpanHost(s)) }
+		getter = func(s *Span) attribute.KeyValue {
+			if s.Type == EventTypeHTTPClient {
+				return ServerAddr(HTTPClientHost(s))
+			}
+			return ServerAddr(HostAsServer(s))
+		}
 	case attr.ServerPort:
 		getter = func(s *Span) attribute.KeyValue { return ServerPort(s.HostPort) }
 	case attr.RPCMethod:
@@ -53,16 +58,16 @@ func SpanOTELGetters(name attr.Name) (attributes.Getter[*Span, attribute.KeyValu
 			if s.IsClientSpan() {
 				return ServerNamespaceMetric(s.OtherNamespace)
 			}
-			return ServerNamespaceMetric(s.ServiceID.Namespace)
+			return ServerNamespaceMetric(s.Service.UID.Namespace)
 		}
 	case attr.Service:
-		getter = func(s *Span) attribute.KeyValue { return ServiceMetric(s.ServiceID.Name) }
+		getter = func(s *Span) attribute.KeyValue { return ServiceMetric(s.Service.UID.Name) }
 	case attr.ServiceInstanceID:
-		getter = func(s *Span) attribute.KeyValue { return semconv.ServiceInstanceID(s.ServiceID.Instance) }
+		getter = func(s *Span) attribute.KeyValue { return semconv.ServiceInstanceID(string(s.Service.UID.Instance)) }
 	case attr.ServiceName:
-		getter = func(s *Span) attribute.KeyValue { return semconv.ServiceName(s.ServiceID.Name) }
+		getter = func(s *Span) attribute.KeyValue { return semconv.ServiceName(s.Service.UID.Name) }
 	case attr.ServiceNamespace:
-		getter = func(s *Span) attribute.KeyValue { return semconv.ServiceNamespace(s.ServiceID.Namespace) }
+		getter = func(s *Span) attribute.KeyValue { return semconv.ServiceNamespace(s.Service.UID.Namespace) }
 	case attr.SpanKind:
 		getter = func(s *Span) attribute.KeyValue { return SpanKindMetric(s.ServiceGraphKind()) }
 	case attr.SpanName:
@@ -73,15 +78,15 @@ func SpanOTELGetters(name attr.Name) (attributes.Getter[*Span, attribute.KeyValu
 		getter = func(s *Span) attribute.KeyValue { return StatusCodeMetric(int(SpanStatusCode(s))) }
 	case attr.DBOperation:
 		getter = func(span *Span) attribute.KeyValue { return DBOperationName(span.Method) }
-	case attr.DBSystem:
+	case attr.DBSystemName:
 		getter = func(span *Span) attribute.KeyValue {
 			switch span.Type {
 			case EventTypeSQLClient:
-				return DBSystem(semconv.DBSystemOtherSQL.Value.AsString())
+				return DBSystemName(span.DBSystemName().Value.AsString())
 			case EventTypeRedisClient, EventTypeRedisServer:
-				return DBSystem(semconv.DBSystemRedis.Value.AsString())
+				return DBSystemName(semconv.DBSystemRedis.Value.AsString())
 			}
-			return DBSystem("unknown")
+			return DBSystemName("unknown")
 		}
 	case attr.ErrorType:
 		getter = func(span *Span) attribute.KeyValue {
@@ -104,6 +109,8 @@ func SpanOTELGetters(name attr.Name) (attributes.Getter[*Span, attribute.KeyValu
 			}
 			return semconv.MessagingDestinationName("")
 		}
+	case attr.CudaKernelName:
+		getter = func(span *Span) attribute.KeyValue { return CudaKernel(span.Method) }
 	}
 	// default: unlike the Prometheus getters, we don't check here for service name nor k8s metadata
 	// because they are already attributes of the Resource instead of the attributes.
@@ -124,10 +131,15 @@ func SpanPromGetters(attrName attr.Name) (attributes.Getter[*Span, string], bool
 		getter = func(s *Span) string { return s.Route }
 	case attr.HTTPUrlPath:
 		getter = func(s *Span) string { return s.Path }
-	case attr.ClientAddr:
-		getter = SpanPeer
-	case attr.ServerAddr:
-		getter = SpanHost
+	case attr.Client, attr.ClientAddr:
+		getter = PeerAsClient
+	case attr.Server, attr.ServerAddr:
+		getter = func(s *Span) string {
+			if s.Type == EventTypeHTTPClient {
+				return HTTPClientHost(s)
+			}
+			return HostAsServer(s)
+		}
 	case attr.ServerPort:
 		getter = func(s *Span) string { return strconv.Itoa(s.HostPort) }
 	case attr.RPCMethod:
@@ -145,11 +157,11 @@ func SpanPromGetters(attrName attr.Name) (attributes.Getter[*Span, string], bool
 			}
 			return ""
 		}
-	case attr.DBSystem:
+	case attr.DBSystemName:
 		getter = func(span *Span) string {
 			switch span.Type {
 			case EventTypeSQLClient:
-				return semconv.DBSystemOtherSQL.Value.AsString()
+				return span.DBSystemName().Value.AsString()
 			case EventTypeRedisClient, EventTypeRedisServer:
 				return semconv.DBSystemRedis.Value.AsString()
 			}
@@ -158,7 +170,7 @@ func SpanPromGetters(attrName attr.Name) (attributes.Getter[*Span, string], bool
 	case attr.DBCollectionName:
 		getter = func(span *Span) string {
 			if span.Type == EventTypeSQLClient {
-				return semconv.DBSystemOtherSQL.Value.AsString()
+				return span.DBSystemName().Value.AsString()
 			}
 			return ""
 		}
@@ -176,14 +188,22 @@ func SpanPromGetters(attrName attr.Name) (attributes.Getter[*Span, string], bool
 			}
 			return ""
 		}
+	case attr.ServiceInstanceID:
+		getter = func(s *Span) string { return s.Service.UID.Instance }
 	// resource metadata values below. Unlike OTEL, they are included here because they
 	// belong to the metric, instead of the Resource
+	case attr.Instance:
+		getter = func(s *Span) string { return s.Service.UID.Instance }
+	case attr.Job:
+		getter = func(s *Span) string { return s.Service.Job() }
 	case attr.ServiceName:
-		getter = func(s *Span) string { return s.ServiceID.Name }
+		getter = func(s *Span) string { return s.Service.UID.Name }
 	case attr.ServiceNamespace:
-		getter = func(s *Span) string { return s.ServiceID.Namespace }
+		getter = func(s *Span) string { return s.Service.UID.Namespace }
+	case attr.CudaKernelName:
+		getter = func(s *Span) string { return s.Method }
 	default:
-		getter = func(s *Span) string { return s.ServiceID.Metadata[attrName] }
+		getter = func(s *Span) string { return s.Service.Metadata[attrName] }
 	}
 	return getter, getter != nil
 }

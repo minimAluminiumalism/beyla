@@ -12,8 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/config"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 const (
@@ -27,7 +28,7 @@ func TestTCPReqSQLParsing(t *testing.T) {
 	op, table, sql := detectSQL(sql)
 	assert.Equal(t, op, "SELECT")
 	assert.Equal(t, table, "accounts")
-	s := TCPToSQLToSpan(&r, op, table, sql)
+	s := TCPToSQLToSpan(&r, op, table, sql, request.DBGeneric)
 	assert.NotNil(t, s)
 	assert.NotEmpty(t, s.Host)
 	assert.NotEmpty(t, s.Peer)
@@ -63,16 +64,23 @@ func TestSQLDetection(t *testing.T) {
 func TestSQLDetectionFails(t *testing.T) {
 	for _, s := range []string{"SELECT", "UPDATES{}", "DELETE {} ", "INSERT// into accounts "} {
 		op, table, _ := detectSQL(s)
-		assert.False(t, validSQL(op, table))
+		assert.False(t, validSQL(op, table, request.DBGeneric))
 		surrounded := randomStringWithSub(s)
 		op, table, _ = detectSQL(surrounded)
-		assert.False(t, validSQL(op, table))
+		assert.False(t, validSQL(op, table, request.DBGeneric))
+	}
+}
+
+func TestSQLDetectionDoesntFailForDetectedKind(t *testing.T) {
+	for _, s := range []string{"SELECT", "DELETE {} "} {
+		op, table, _ := detectSQL(s)
+		assert.True(t, validSQL(op, table, request.DBPostgres))
 	}
 }
 
 // Test making sure that issue https://github.com/grafana/beyla/issues/854 is fixed
 func TestReadTCPRequestIntoSpan_Overflow(t *testing.T) {
-	fltr := TestPidsFilter{services: map[uint32]svc.ID{}}
+	fltr := TestPidsFilter{services: map[uint32]svc.Attrs{}}
 
 	tri := TCPRequestInfo{
 		Len: 340,
@@ -97,9 +105,12 @@ func TestReadTCPRequestIntoSpan_Overflow(t *testing.T) {
 			169, 193, 172, 206, 225, 219, 112, 52, 115, 32, 147, 192, 127, 211, 129, 241,
 		},
 	}
+
+	cfg := config.EBPFTracer{HeuristicSQLDetect: true}
+
 	binaryRecord := bytes.Buffer{}
 	require.NoError(t, binary.Write(&binaryRecord, binary.LittleEndian, tri))
-	span, ignore, err := ReadTCPRequestIntoSpan(&ringbuf.Record{RawSample: binaryRecord.Bytes()}, &fltr)
+	span, ignore, err := ReadTCPRequestIntoSpan(&cfg, &ringbuf.Record{RawSample: binaryRecord.Bytes()}, &fltr)
 	require.NoError(t, err)
 	require.False(t, ignore)
 
@@ -154,7 +165,7 @@ func TestTCPReqKafkaParsing(t *testing.T) {
 	assert.Greater(t, s.End, s.Start)
 	assert.Equal(t, "process", s.Method)
 	assert.Equal(t, "important", s.Path)
-	assert.Equal(t, "sarama", s.OtherNamespace)
+	assert.Equal(t, "sarama", s.Statement)
 	assert.Equal(t, request.EventTypeKafkaClient, s.Type)
 }
 

@@ -7,10 +7,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/grafana/beyla/test/integration/components/docker"
-	"github.com/grafana/beyla/test/integration/components/kube"
-	k8s "github.com/grafana/beyla/test/integration/k8s/common"
-	"github.com/grafana/beyla/test/tools"
+	"github.com/grafana/beyla/v2/test/integration/components/docker"
+	"github.com/grafana/beyla/v2/test/integration/components/kube"
+	k8s "github.com/grafana/beyla/v2/test/integration/k8s/common"
+	"github.com/grafana/beyla/v2/test/integration/k8s/common/testpath"
+	"github.com/grafana/beyla/v2/test/tools"
 )
 
 var cluster *kube.Kind
@@ -23,24 +24,23 @@ func TestMain(m *testing.M) {
 		docker.ImageBuild{Tag: "beyla:dev", Dockerfile: k8s.DockerfileBeyla},
 		docker.ImageBuild{Tag: "grpcpinger:dev", Dockerfile: k8s.DockerfilePinger},
 		docker.ImageBuild{Tag: "httppinger:dev", Dockerfile: k8s.DockerfileHTTPPinger},
-		docker.ImageBuild{Tag: "quay.io/prometheus/prometheus:v2.53.0"},
+		docker.ImageBuild{Tag: "quay.io/prometheus/prometheus:v2.55.1"},
 	); err != nil {
-		slog.Error("can't build docker images", err)
+		slog.Error("can't build docker images", "error", err)
 		os.Exit(-1)
 	}
 
 	cluster = kube.NewKind("test-kind-cluster-prom",
-		kube.ExportLogs(k8s.PathKindLogs),
-		kube.KindConfig(k8s.PathManifests+"/00-kind.yml"),
+		kube.KindConfig(testpath.Manifests+"/00-kind.yml"),
 		kube.LocalImage("testserver:dev"),
 		kube.LocalImage("beyla:dev"),
 		kube.LocalImage("grpcpinger:dev"),
 		kube.LocalImage("httppinger:dev"),
-		kube.LocalImage("quay.io/prometheus/prometheus:v2.53.0"),
-		kube.Deploy(k8s.PathManifests+"/01-volumes.yml"),
-		kube.Deploy(k8s.PathManifests+"/01-serviceaccount.yml"),
-		kube.Deploy(k8s.PathManifests+"/02-prometheus-promscrape.yml"),
-		kube.Deploy(k8s.PathManifests+"/05-instrumented-service-prometheus.yml"),
+		kube.LocalImage("quay.io/prometheus/prometheus:v2.55.1"),
+		kube.Deploy(testpath.Manifests+"/01-volumes.yml"),
+		kube.Deploy(testpath.Manifests+"/01-serviceaccount.yml"),
+		kube.Deploy(testpath.Manifests+"/02-prometheus-promscrape.yml"),
+		kube.Deploy(testpath.Manifests+"/05-instrumented-service-prometheus.yml"),
 	)
 
 	cluster.Run(m)

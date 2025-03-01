@@ -15,9 +15,9 @@ import (
 
 	otelsdk "go.opentelemetry.io/otel/sdk"
 
-	"github.com/grafana/beyla/pkg/beyla"
-	"github.com/grafana/beyla/pkg/buildinfo"
-	"github.com/grafana/beyla/pkg/components"
+	"github.com/grafana/beyla/v2/pkg/beyla"
+	"github.com/grafana/beyla/v2/pkg/buildinfo"
+	"github.com/grafana/beyla/v2/pkg/components"
 )
 
 func main() {
@@ -48,7 +48,7 @@ func main() {
 	}
 
 	if err := lvl.UnmarshalText([]byte(config.LogLevel)); err != nil {
-		slog.Error("unknown log level specified, choices are [DEBUG, INFO, WARN, ERROR]", err)
+		slog.Error("unknown log level specified, choices are [DEBUG, INFO, WARN, ERROR]", "error", err)
 		os.Exit(-1)
 	}
 
@@ -65,7 +65,7 @@ func main() {
 		go func() {
 			slog.Info("starting PProf HTTP listener", "port", config.ProfilePort)
 			err := http.ListenAndServe(fmt.Sprintf(":%d", config.ProfilePort), nil)
-			slog.Error("PProf HTTP listener stopped working", err)
+			slog.Error("PProf HTTP listener stopped working", "error", err)
 		}()
 	}
 
@@ -75,7 +75,7 @@ func main() {
 	ctx, _ := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
 
 	if err := components.RunBeyla(ctx, config); err != nil {
-		slog.Error("Beyla can't start", "error", err)
+		slog.Error("Beyla ran with errors", "error", err)
 		os.Exit(-1)
 	}
 
@@ -90,14 +90,14 @@ func loadConfig(configPath *string) *beyla.Config {
 	if configPath != nil && *configPath != "" {
 		var err error
 		if configReader, err = os.Open(*configPath); err != nil {
-			slog.Error("can't open "+*configPath, err)
+			slog.Error("can't open "+*configPath, "error", err)
 			os.Exit(-1)
 		}
 		defer configReader.Close()
 	}
 	config, err := beyla.LoadConfig(configReader)
 	if err != nil {
-		slog.Error("wrong configuration", err)
+		slog.Error("wrong configuration", "error", err)
 		// nolint:gocritic
 		os.Exit(-1)
 	}

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,21 +17,24 @@ import (
 	"github.com/mariomac/pipes/pipe"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.25.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/sqlprune"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/sqlprune"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 func TestHTTPTracesEndpoint(t *testing.T) {
@@ -41,7 +46,7 @@ func TestHTTPTracesEndpoint(t *testing.T) {
 	}
 
 	t.Run("testing with two endpoints", func(t *testing.T) {
-		testHTTPTracesOptions(t, otlpOptions{Scheme: "https", Endpoint: "localhost:3232", URLPath: "/v1/traces", HTTPHeaders: map[string]string{}}, &tcfg)
+		testHTTPTracesOptions(t, otlpOptions{Scheme: "https", Endpoint: "localhost:3232", URLPath: "/v1/traces", Headers: map[string]string{}}, &tcfg)
 	})
 
 	tcfg = TracesConfig{
@@ -50,7 +55,7 @@ func TestHTTPTracesEndpoint(t *testing.T) {
 	}
 
 	t.Run("testing with only common endpoint", func(t *testing.T) {
-		testHTTPTracesOptions(t, otlpOptions{Scheme: "https", Endpoint: "localhost:3131", BaseURLPath: "/otlp", URLPath: "/otlp/v1/traces", HTTPHeaders: map[string]string{}}, &tcfg)
+		testHTTPTracesOptions(t, otlpOptions{Scheme: "https", Endpoint: "localhost:3131", BaseURLPath: "/otlp", URLPath: "/otlp/v1/traces", Headers: map[string]string{}}, &tcfg)
 	})
 
 	tcfg = TracesConfig{
@@ -59,7 +64,7 @@ func TestHTTPTracesEndpoint(t *testing.T) {
 		Instrumentations: []string{instrumentations.InstrumentationALL},
 	}
 	t.Run("testing with insecure endpoint", func(t *testing.T) {
-		testHTTPTracesOptions(t, otlpOptions{Scheme: "http", Endpoint: "localhost:3232", Insecure: true, HTTPHeaders: map[string]string{}}, &tcfg)
+		testHTTPTracesOptions(t, otlpOptions{Scheme: "http", Endpoint: "localhost:3232", Insecure: true, Headers: map[string]string{}}, &tcfg)
 	})
 
 	tcfg = TracesConfig{
@@ -69,7 +74,7 @@ func TestHTTPTracesEndpoint(t *testing.T) {
 	}
 
 	t.Run("testing with skip TLS verification", func(t *testing.T) {
-		testHTTPTracesOptions(t, otlpOptions{Scheme: "https", Endpoint: "localhost:3232", URLPath: "/v1/traces", SkipTLSVerify: true, HTTPHeaders: map[string]string{}}, &tcfg)
+		testHTTPTracesOptions(t, otlpOptions{Scheme: "https", Endpoint: "localhost:3232", URLPath: "/v1/traces", SkipTLSVerify: true, Headers: map[string]string{}}, &tcfg)
 	})
 }
 
@@ -87,7 +92,7 @@ func TestHTTPTracesWithGrafanaOptions(t *testing.T) {
 			Endpoint:    "otlp-gateway-eu-west-23.grafana.net",
 			BaseURLPath: "/otlp",
 			URLPath:     "/otlp/v1/traces",
-			HTTPHeaders: map[string]string{
+			Headers: map[string]string{
 				// Basic + output of: echo -n 12345:affafafaafkd | gbase64 -w 0
 				"Authorization": "Basic MTIzNDU6YWZmYWZhZmFhZmtk",
 			},
@@ -99,7 +104,7 @@ func TestHTTPTracesWithGrafanaOptions(t *testing.T) {
 			Scheme:   "https",
 			Endpoint: "localhost:3939",
 			URLPath:  "/v1/traces",
-			HTTPHeaders: map[string]string{
+			Headers: map[string]string{
 				// Base64 representation of 12345:affafafaafkd
 				"Authorization": "Basic MTIzNDU6YWZmYWZhZmFhZmtk",
 			},
@@ -177,7 +182,7 @@ func TestHTTPTracesEndpointHeaders(t *testing.T) {
 				Instrumentations: []string{instrumentations.InstrumentationALL},
 			})
 			require.NoError(t, err)
-			assert.Equal(t, tc.ExpectedHeaders, opts.HTTPHeaders)
+			assert.Equal(t, tc.ExpectedHeaders, opts.Headers)
 		})
 	}
 }
@@ -195,7 +200,7 @@ func TestGRPCTracesEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with two endpoints", func(t *testing.T) {
-		testTracesGRPOptions(t, otlpOptions{Endpoint: "localhost:3232"}, &tcfg)
+		testTracesGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", Headers: map[string]string{}}, &tcfg)
 	})
 
 	tcfg = TracesConfig{
@@ -204,7 +209,7 @@ func TestGRPCTracesEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with only common endpoint", func(t *testing.T) {
-		testTracesGRPOptions(t, otlpOptions{Endpoint: "localhost:3131"}, &tcfg)
+		testTracesGRPCOptions(t, otlpOptions{Endpoint: "localhost:3131", Headers: map[string]string{}}, &tcfg)
 	})
 
 	tcfg = TracesConfig{
@@ -213,7 +218,7 @@ func TestGRPCTracesEndpointOptions(t *testing.T) {
 		Instrumentations: []string{instrumentations.InstrumentationALL},
 	}
 	t.Run("testing with insecure endpoint", func(t *testing.T) {
-		testTracesGRPOptions(t, otlpOptions{Endpoint: "localhost:3232", Insecure: true}, &tcfg)
+		testTracesGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", Insecure: true, Headers: map[string]string{}}, &tcfg)
 	})
 
 	tcfg = TracesConfig{
@@ -223,11 +228,58 @@ func TestGRPCTracesEndpointOptions(t *testing.T) {
 	}
 
 	t.Run("testing with skip TLS verification", func(t *testing.T) {
-		testTracesGRPOptions(t, otlpOptions{Endpoint: "localhost:3232", SkipTLSVerify: true}, &tcfg)
+		testTracesGRPCOptions(t, otlpOptions{Endpoint: "localhost:3232", SkipTLSVerify: true, Headers: map[string]string{}}, &tcfg)
 	})
 }
 
-func testTracesGRPOptions(t *testing.T, expected otlpOptions, tcfg *TracesConfig) {
+func TestGRPCTracesEndpointHeaders(t *testing.T) {
+	type testCase struct {
+		Description     string
+		Env             map[string]string
+		ExpectedHeaders map[string]string
+		Grafana         GrafanaOTLP
+	}
+	for _, tc := range []testCase{
+		{Description: "No headers",
+			ExpectedHeaders: map[string]string{}},
+		{Description: "defining common OTLP_HEADERS",
+			Env:             map[string]string{"OTEL_EXPORTER_OTLP_HEADERS": "Foo=Bar ==,Authorization=Base 2222=="},
+			ExpectedHeaders: map[string]string{"Foo": "Bar ==", "Authorization": "Base 2222=="}},
+		{Description: "defining common OTLP_TRACES_HEADERS",
+			Env:             map[string]string{"OTEL_EXPORTER_OTLP_TRACES_HEADERS": "Foo=Bar ==,Authorization=Base 1234=="},
+			ExpectedHeaders: map[string]string{"Foo": "Bar ==", "Authorization": "Base 1234=="}},
+		{Description: "OTLP_TRACES_HEADERS takes precedence over OTLP_HEADERS",
+			Env: map[string]string{
+				"OTEL_EXPORTER_OTLP_HEADERS":        "Foo=Bar ==,Authorization=Base 3210==",
+				"OTEL_EXPORTER_OTLP_TRACES_HEADERS": "Authorization=Base 1111==",
+			},
+			ExpectedHeaders: map[string]string{"Foo": "Bar ==", "Authorization": "Base 1111=="}},
+	} {
+		// mutex to avoid running testcases in parallel so we don't mess up with env vars
+		mt := sync.Mutex{}
+		t.Run(fmt.Sprint(tc.Description), func(t *testing.T) {
+			mt.Lock()
+			restore := restoreEnvAfterExecution()
+			defer func() {
+				restore()
+				mt.Unlock()
+			}()
+			for k, v := range tc.Env {
+				require.NoError(t, os.Setenv(k, v))
+			}
+
+			opts, err := getGRPCTracesEndpointOptions(&TracesConfig{
+				TracesEndpoint:   "https://localhost:1234/v1/traces",
+				Grafana:          &tc.Grafana,
+				Instrumentations: []string{instrumentations.InstrumentationALL},
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.ExpectedHeaders, opts.Headers)
+		})
+	}
+}
+
+func testTracesGRPCOptions(t *testing.T, expected otlpOptions, tcfg *TracesConfig) {
 	defer restoreEnvAfterExecution()()
 	opts, err := getGRPCTracesEndpointOptions(tcfg)
 	require.NoError(t, err)
@@ -523,7 +575,7 @@ func TestGenerateTracesAttributes(t *testing.T) {
 		assert.Equal(t, 5, attrs.Len())
 		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBOperation), "SELECT")
 		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBCollectionName), "credentials")
-		ensureTraceStrAttr(t, attrs, semconv.DBSystemKey, "other_sql")
+		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBSystemName), "other_sql")
 		ensureTraceAttrNotExists(t, attrs, attribute.Key(attr.DBQueryText))
 	})
 
@@ -544,7 +596,7 @@ func TestGenerateTracesAttributes(t *testing.T) {
 		assert.Equal(t, 5, attrs.Len())
 		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBOperation), "SELECT")
 		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBCollectionName), "credentials")
-		ensureTraceStrAttr(t, attrs, semconv.DBSystemKey, "other_sql")
+		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBSystemName), "other_sql")
 		ensureTraceAttrNotExists(t, attrs, attribute.Key(attr.DBQueryText))
 	})
 
@@ -565,11 +617,11 @@ func TestGenerateTracesAttributes(t *testing.T) {
 		assert.Equal(t, 6, attrs.Len())
 		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBOperation), "SELECT")
 		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBCollectionName), "credentials")
-		ensureTraceStrAttr(t, attrs, semconv.DBSystemKey, "other_sql")
+		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBSystemName), "other_sql")
 		ensureTraceStrAttr(t, attrs, attribute.Key(attr.DBQueryText), "SELECT password FROM credentials WHERE username=\"bill\"")
 	})
 	t.Run("test Kafka trace generation", func(t *testing.T) {
-		span := request.Span{Type: request.EventTypeKafkaClient, Method: "process", Path: "important-topic", OtherNamespace: "test"}
+		span := request.Span{Type: request.EventTypeKafkaClient, Method: "process", Path: "important-topic", Statement: "test"}
 		traces := GenerateTraces(&span, "host-id", map[attr.Name]struct{}{}, []attribute.KeyValue{})
 
 		assert.Equal(t, 1, traces.ResourceSpans().Len())
@@ -590,13 +642,173 @@ func TestGenerateTracesAttributes(t *testing.T) {
 		defer restoreEnvAfterExecution()()
 		require.NoError(t, os.Setenv(envResourceAttrs, "deployment.environment=productions,source.upstream=beyla"))
 		span := request.Span{Type: request.EventTypeHTTP, Method: "GET", Route: "/test", Status: 200}
-		traces := GenerateTraces(&span, "host-id", map[attr.Name]struct{}{}, ResourceAttrsFromEnv())
+		traces := GenerateTraces(&span, "host-id", map[attr.Name]struct{}{}, ResourceAttrsFromEnv(&span.Service))
 
 		assert.Equal(t, 1, traces.ResourceSpans().Len())
 		rs := traces.ResourceSpans().At(0)
 		attrs := rs.Resource().Attributes()
 		ensureTraceStrAttr(t, attrs, attribute.Key("deployment.environment"), "productions")
 		ensureTraceStrAttr(t, attrs, attribute.Key("source.upstream"), "beyla")
+	})
+}
+
+func TestTraceSampling(t *testing.T) {
+	spans := []request.Span{}
+	start := time.Now()
+	for i := 0; i < 10; i++ {
+		span := request.Span{Type: request.EventTypeHTTP,
+			RequestStart: start.UnixNano(),
+			Start:        start.Add(time.Second).UnixNano(),
+			End:          start.Add(3 * time.Second).UnixNano(),
+			Method:       "GET",
+			Route:        "/test" + strconv.Itoa(i),
+			Status:       200,
+			Service:      svc.Attrs{},
+			TraceID:      RandomTraceID(),
+		}
+		spans = append(spans, span)
+	}
+
+	receiver := makeTracesTestReceiver([]string{"http"})
+
+	t.Run("test sample all", func(t *testing.T) {
+		sampler := sdktrace.AlwaysSample()
+		attrs := make(map[attr.Name]struct{})
+
+		tr := []ptrace.Traces{}
+
+		exporter := TestExporter{
+			collector: func(td ptrace.Traces) {
+				tr = append(tr, td)
+			},
+		}
+
+		receiver.processSpans(exporter, spans, attrs, sampler)
+		assert.Equal(t, 10, len(tr))
+	})
+
+	t.Run("test sample nothing", func(t *testing.T) {
+		sampler := sdktrace.NeverSample()
+		attrs := make(map[attr.Name]struct{})
+
+		tr := []ptrace.Traces{}
+
+		exporter := TestExporter{
+			collector: func(td ptrace.Traces) {
+				tr = append(tr, td)
+			},
+		}
+
+		receiver.processSpans(exporter, spans, attrs, sampler)
+		assert.Equal(t, 0, len(tr))
+	})
+
+	t.Run("test sample 1/10th", func(t *testing.T) {
+		sampler := sdktrace.TraceIDRatioBased(0.1)
+		attrs := make(map[attr.Name]struct{})
+
+		tr := []ptrace.Traces{}
+
+		exporter := TestExporter{
+			collector: func(td ptrace.Traces) {
+				tr = append(tr, td)
+			},
+		}
+
+		receiver.processSpans(exporter, spans, attrs, sampler)
+		// The result is likely 0,1,2 with 1/10th, but since sampling
+		// it's a probabilistic matter, we don't want this test to become
+		// flaky as some of them could report even 4-5 samples
+		assert.GreaterOrEqual(t, 6, len(tr))
+	})
+}
+
+func TestTraceSkipSpanMetrics(t *testing.T) {
+	spans := []request.Span{}
+	start := time.Now()
+	for i := 0; i < 10; i++ {
+		span := request.Span{Type: request.EventTypeHTTP,
+			RequestStart: start.UnixNano(),
+			Start:        start.Add(time.Second).UnixNano(),
+			End:          start.Add(3 * time.Second).UnixNano(),
+			Method:       "GET",
+			Route:        "/test" + strconv.Itoa(i),
+			Status:       200,
+			Service:      svc.Attrs{},
+			TraceID:      RandomTraceID(),
+		}
+		spans = append(spans, span)
+	}
+
+	t.Run("test with span metrics on", func(t *testing.T) {
+		receiver := makeTracesTestReceiverWithSpanMetrics([]string{"http"})
+
+		sampler := sdktrace.AlwaysSample()
+		attrs, err := receiver.getConstantAttributes()
+		assert.Nil(t, err)
+
+		tr := []ptrace.Traces{}
+
+		exporter := TestExporter{
+			collector: func(td ptrace.Traces) {
+				tr = append(tr, td)
+			},
+		}
+
+		receiver.processSpans(exporter, spans, attrs, sampler)
+		assert.Equal(t, 10, len(tr))
+
+		for _, ts := range tr {
+			for i := 0; i < ts.ResourceSpans().Len(); i++ {
+				rs := ts.ResourceSpans().At(i)
+				for j := 0; j < rs.ScopeSpans().Len(); j++ {
+					ss := rs.ScopeSpans().At(j)
+					for k := 0; k < ss.Spans().Len(); k++ {
+						span := ss.Spans().At(k)
+						if strings.HasPrefix(span.Name(), "GET /test") {
+							v, ok := span.Attributes().Get(string(attr.SkipSpanMetrics.OTEL()))
+							assert.True(t, ok)
+							assert.Equal(t, true, v.Bool())
+						}
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("test with span metrics off", func(t *testing.T) {
+		receiver := makeTracesTestReceiver([]string{"http"})
+
+		sampler := sdktrace.AlwaysSample()
+		attrs, err := receiver.getConstantAttributes()
+		assert.Nil(t, err)
+
+		tr := []ptrace.Traces{}
+
+		exporter := TestExporter{
+			collector: func(td ptrace.Traces) {
+				tr = append(tr, td)
+			},
+		}
+
+		receiver.processSpans(exporter, spans, attrs, sampler)
+		assert.Equal(t, 10, len(tr))
+
+		for _, ts := range tr {
+			for i := 0; i < ts.ResourceSpans().Len(); i++ {
+				rs := ts.ResourceSpans().At(i)
+				for j := 0; j < rs.ScopeSpans().Len(); j++ {
+					ss := rs.ScopeSpans().At(j)
+					for k := 0; k < ss.Spans().Len(); k++ {
+						span := ss.Spans().At(k)
+						if strings.HasPrefix(span.Name(), "GET /test") {
+							_, ok := span.Attributes().Get(string(attr.SkipSpanMetrics.OTEL()))
+							assert.False(t, ok)
+						}
+					}
+				}
+			}
+		}
 	})
 }
 
@@ -677,166 +889,6 @@ func TestCodeToStatusCode(t *testing.T) {
 
 		result := codeToStatusCode(code)
 		assert.Equal(t, expected, result)
-	})
-}
-
-func TestTraces_InternalInstrumentation(t *testing.T) {
-	defer restoreEnvAfterExecution()()
-	// fake OTEL collector server
-	coll := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		rw.WriteHeader(http.StatusOK)
-	}))
-	defer coll.Close()
-	// Wait for the HTTP server to be alive
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		resp, err := coll.Client().Get(coll.URL + "/foo")
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-	})
-	builder := pipe.NewBuilder(&testPipeline{}, pipe.ChannelBufferLen(10))
-	// create a simple dummy graph to send data to the Metrics reporter, which will send
-	// metrics to the fake collector
-	sendData := make(chan struct{}, 10)
-	pipe.AddStart(builder, func(impl *testPipeline) *pipe.Start[[]request.Span] {
-		return &impl.inputNode
-	}, func(out chan<- []request.Span) {
-		// on every send data signal, the traces generator sends a dummy trace
-		for range sendData {
-			out <- []request.Span{{Type: request.EventTypeHTTP}}
-		}
-	})
-	internalTraces := &fakeInternalTraces{}
-	pipe.AddFinalProvider(builder, func(impl *testPipeline) *pipe.Final[[]request.Span] {
-		return &impl.exporter
-	}, TracesReceiver(context.Background(),
-		TracesConfig{
-			CommonEndpoint:    coll.URL,
-			BatchTimeout:      10 * time.Millisecond,
-			ReportersCacheLen: 16,
-			Instrumentations:  []string{instrumentations.InstrumentationALL},
-		},
-		&global.ContextInfo{
-			Metrics: internalTraces,
-		},
-		attributes.Selection{},
-	))
-	graph, err := builder.Build()
-	require.NoError(t, err)
-
-	graph.Start()
-
-	sendData <- struct{}{}
-	var previousSum, previousCount int
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		// we can't guarantee the number of calls at test time, but they must be at least 1
-		previousSum, previousCount = internalTraces.SumCount()
-		assert.LessOrEqual(t, 1, previousSum)
-		assert.LessOrEqual(t, 1, previousCount)
-		// the sum of metrics should be larger or equal than the number of calls (1 call : n metrics)
-		assert.LessOrEqual(t, previousCount, previousSum)
-		// no call should return error
-		assert.Empty(t, internalTraces.Errors())
-	})
-
-	sendData <- struct{}{}
-	// after some time, the number of calls should be higher than before
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		sum, count := internalTraces.SumCount()
-		assert.LessOrEqual(t, previousSum, sum)
-		assert.LessOrEqual(t, previousCount, count)
-		assert.LessOrEqual(t, count, sum)
-		// no call should return error
-		assert.Zero(t, internalTraces.Errors())
-	})
-
-	// collector starts failing, so errors should be received
-	coll.CloseClientConnections()
-	coll.Close()
-	// Wait for the HTTP server to be stopped
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		_, err := coll.Client().Get(coll.URL + "/foo")
-		require.Error(t, err)
-	})
-
-	var previousErrCount int
-	sendData <- struct{}{}
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		previousSum, previousCount = internalTraces.SumCount()
-		// calls should start returning errors
-		previousErrCount = internalTraces.Errors()
-		assert.NotZero(t, previousErrCount)
-	})
-
-	// after a while, metrics sum should not increase but errors do
-	sendData <- struct{}{}
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		sum, count := internalTraces.SumCount()
-		assert.Equal(t, previousSum, sum)
-		assert.Equal(t, previousCount, count)
-		assert.Less(t, previousErrCount, internalTraces.Errors())
-	})
-}
-
-func TestTraces_InternalInstrumentationSampling(t *testing.T) {
-	defer restoreEnvAfterExecution()()
-	// fake OTEL collector server
-	coll := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
-		rw.WriteHeader(http.StatusOK)
-	}))
-	defer coll.Close()
-	// Wait for the HTTP server to be alive
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		resp, err := coll.Client().Get(coll.URL + "/foo")
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-	})
-
-	builder := pipe.NewBuilder(&testPipeline{})
-	// create a simple dummy graph to send data to the Metrics reporter, which will send
-	// metrics to the fake collector
-	sendData := make(chan struct{})
-	pipe.AddStart(builder, func(impl *testPipeline) *pipe.Start[[]request.Span] {
-		return &impl.inputNode
-	}, func(out chan<- []request.Span) { // on every send data signal, the traces generator sends a dummy trace
-		for range sendData {
-			out <- []request.Span{{Type: request.EventTypeHTTP}}
-		}
-	})
-	internalTraces := &fakeInternalTraces{}
-	pipe.AddFinalProvider(builder, func(impl *testPipeline) *pipe.Final[[]request.Span] {
-		return &impl.exporter
-	}, TracesReceiver(context.Background(),
-		TracesConfig{
-			CommonEndpoint:    coll.URL,
-			BatchTimeout:      10 * time.Millisecond,
-			ExportTimeout:     5 * time.Second,
-			Sampler:           Sampler{Name: "always_off"}, // we won't send any trace
-			ReportersCacheLen: 16,
-			Instrumentations:  []string{instrumentations.InstrumentationALL},
-		},
-		&global.ContextInfo{
-			Metrics: internalTraces,
-		},
-		attributes.Selection{},
-	))
-
-	graph, err := builder.Build()
-	require.NoError(t, err)
-
-	graph.Start()
-
-	// Let's make 10 traces, none should be seen
-	for i := 0; i < 10; i++ {
-		sendData <- struct{}{}
-	}
-	var previousSum, previousCount int
-	test.Eventually(t, timeout, func(t require.TestingT) {
-		// we shouldn't see any data
-		previousSum, previousCount = internalTraces.SumCount()
-		assert.Equal(t, 0, previousSum)
-		assert.Equal(t, 0, previousCount)
-		// no call should return error
-		assert.Empty(t, internalTraces.Errors())
 	})
 }
 
@@ -927,15 +979,15 @@ func TestTracesInstrumentations(t *testing.T) {
 	}
 
 	spans := []request.Span{
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTPClient, Method: "PUT", Route: "/bar", RequestStart: 150, End: 175},
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeGRPC, Path: "/grpcFoo", RequestStart: 100, End: 200},
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeGRPCClient, Path: "/grpcGoo", RequestStart: 150, End: 175},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTPClient, Method: "PUT", Route: "/bar", RequestStart: 150, End: 175},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeGRPC, Path: "/grpcFoo", RequestStart: 100, End: 200},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeGRPCClient, Path: "/grpcGoo", RequestStart: 150, End: 175},
 		makeSQLRequestSpan("SELECT password FROM credentials WHERE username=\"bill\""),
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeRedisClient, Method: "SET", Path: "redis_db", RequestStart: 150, End: 175},
-		{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeRedisServer, Method: "GET", Path: "redis_db", RequestStart: 150, End: 175},
-		{Type: request.EventTypeKafkaClient, Method: "process", Path: "important-topic", OtherNamespace: "test"},
-		{Type: request.EventTypeKafkaServer, Method: "publish", Path: "important-topic", OtherNamespace: "test"},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeRedisClient, Method: "SET", Path: "redis_db", RequestStart: 150, End: 175},
+		{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeRedisServer, Method: "GET", Path: "redis_db", RequestStart: 150, End: 175},
+		{Type: request.EventTypeKafkaClient, Method: "process", Path: "important-topic", Statement: "test"},
+		{Type: request.EventTypeKafkaServer, Method: "publish", Path: "important-topic", Statement: "test"},
 	}
 
 	for _, tt := range tests {
@@ -958,6 +1010,104 @@ func TestTracesInstrumentations(t *testing.T) {
 	}
 }
 
+func TestTraces_InternalInstrumentation(t *testing.T) {
+	defer restoreEnvAfterExecution()()
+	// fake OTEL collector server
+	coll := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+	}))
+	defer coll.Close()
+	// Wait for the HTTP server to be alive
+	test.Eventually(t, timeout, func(t require.TestingT) {
+		resp, err := coll.Client().Get(coll.URL + "/foo")
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+	builder := pipe.NewBuilder(&testPipeline{}, pipe.ChannelBufferLen(10))
+	// create a simple dummy graph to send data to the Metrics reporter, which will send
+	// metrics to the fake collector
+	sendData := make(chan struct{}, 10)
+	pipe.AddStart(builder, func(impl *testPipeline) *pipe.Start[[]request.Span] {
+		return &impl.inputNode
+	}, func(out chan<- []request.Span) {
+		// on every send data signal, the traces generator sends a dummy trace
+		for range sendData {
+			out <- []request.Span{{Type: request.EventTypeHTTP}}
+		}
+	})
+	internalTraces := &fakeInternalTraces{}
+	pipe.AddFinalProvider(builder, func(impl *testPipeline) *pipe.Final[[]request.Span] {
+		return &impl.exporter
+	}, TracesReceiver(context.Background(),
+		TracesConfig{
+			CommonEndpoint:    coll.URL,
+			BatchTimeout:      10 * time.Millisecond,
+			ReportersCacheLen: 16,
+			Instrumentations:  []string{instrumentations.InstrumentationALL},
+		},
+		false,
+		&global.ContextInfo{
+			Metrics: internalTraces,
+		},
+		attributes.Selection{},
+	))
+	graph, err := builder.Build()
+	require.NoError(t, err)
+
+	graph.Start()
+
+	sendData <- struct{}{}
+	var previousSum, previousCount int
+	test.Eventually(t, timeout, func(t require.TestingT) {
+		// we can't guarantee the number of calls at test time, but they must be at least 1
+		previousSum, previousCount = internalTraces.SumCount()
+		assert.LessOrEqual(t, 1, previousSum)
+		assert.LessOrEqual(t, 1, previousCount)
+		// the sum of metrics should be larger or equal than the number of calls (1 call : n metrics)
+		assert.LessOrEqual(t, previousCount, previousSum)
+		// no call should return error
+		assert.Empty(t, internalTraces.Errors())
+	})
+
+	sendData <- struct{}{}
+	// after some time, the number of calls should be higher than before
+	test.Eventually(t, timeout, func(t require.TestingT) {
+		sum, count := internalTraces.SumCount()
+		assert.LessOrEqual(t, previousSum, sum)
+		assert.LessOrEqual(t, previousCount, count)
+		assert.LessOrEqual(t, count, sum)
+		// no call should return error
+		assert.Zero(t, internalTraces.Errors())
+	})
+
+	// collector starts failing, so errors should be received
+	coll.CloseClientConnections()
+	coll.Close()
+	// Wait for the HTTP server to be stopped
+	test.Eventually(t, timeout, func(t require.TestingT) {
+		_, err := coll.Client().Get(coll.URL + "/foo")
+		require.Error(t, err)
+	})
+
+	var previousErrCount int
+	sendData <- struct{}{}
+	test.Eventually(t, timeout, func(t require.TestingT) {
+		previousSum, previousCount = internalTraces.SumCount()
+		// calls should start returning errors
+		previousErrCount = internalTraces.Errors()
+		assert.NotZero(t, previousErrCount)
+	})
+
+	// after a while, metrics sum should not increase but errors do
+	sendData <- struct{}{}
+	test.Eventually(t, timeout, func(t require.TestingT) {
+		sum, count := internalTraces.SumCount()
+		assert.Equal(t, previousSum, sum)
+		assert.Equal(t, previousCount, count)
+		assert.Less(t, previousErrCount, internalTraces.Errors())
+	})
+}
+
 func TestTracesAttrReuse(t *testing.T) {
 	tests := []struct {
 		name string
@@ -965,17 +1115,17 @@ func TestTracesAttrReuse(t *testing.T) {
 		same bool
 	}{
 		{
-			name: "Reuses the trace attributes, with svc.UID defined",
-			span: request.Span{ServiceID: svc.ID{UID: "foo"}, Type: request.EventTypeHTTP, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
+			name: "Reuses the trace attributes, with svc.Instance defined",
+			span: request.Span{Service: svc.Attrs{UID: svc.UID{Instance: "foo"}}, Type: request.EventTypeHTTP, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
 			same: true,
 		},
 		{
-			name: "No UID, no caching of trace attributes",
-			span: request.Span{ServiceID: svc.ID{}, Type: request.EventTypeHTTP, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
+			name: "No Instance, no caching of trace attributes",
+			span: request.Span{Service: svc.Attrs{}, Type: request.EventTypeHTTP, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
 			same: false,
 		},
 		{
-			name: "No ServiceID, no caching of trace attributes",
+			name: "No Service, no caching of trace attributes",
 			span: request.Span{Type: request.EventTypeHTTP, Method: "GET", Route: "/foo", RequestStart: 100, End: 200},
 			same: false,
 		},
@@ -983,9 +1133,50 @@ func TestTracesAttrReuse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			attr1 := traceAppResourceAttrs("123", &tt.span.ServiceID)
-			attr2 := traceAppResourceAttrs("123", &tt.span.ServiceID)
+			attr1 := traceAppResourceAttrs("123", &tt.span.Service)
+			attr2 := traceAppResourceAttrs("123", &tt.span.Service)
 			assert.Equal(t, tt.same, &attr1[0] == &attr2[0], tt.name)
+		})
+	}
+}
+
+func TestTracesSkipsInstrumented(t *testing.T) {
+	svcNoExport := svc.Attrs{}
+
+	svcNoExportTraces := svc.Attrs{}
+	svcNoExportTraces.SetExportsOTelMetrics()
+
+	svcExportTraces := svc.Attrs{}
+	svcExportTraces.SetExportsOTelTraces()
+
+	tests := []struct {
+		name     string
+		spans    []request.Span
+		filtered bool
+	}{
+		{
+			name:     "Foo span is not filtered",
+			spans:    []request.Span{{Service: svcNoExport, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/foo", RequestStart: 100, End: 200}},
+			filtered: false,
+		},
+		{
+			name:     "/v1/metrics span is not filtered",
+			spans:    []request.Span{{Service: svcNoExportTraces, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/v1/metrics", RequestStart: 100, End: 200}},
+			filtered: false,
+		},
+		{
+			name:     "/v1/traces span is filtered",
+			spans:    []request.Span{{Service: svcExportTraces, Type: request.EventTypeHTTPClient, Method: "GET", Route: "/v1/traces", RequestStart: 100, End: 200}},
+			filtered: true,
+		},
+	}
+
+	tr := makeTracesTestReceiver([]string{instrumentations.InstrumentationALL})
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			traces := generateTracesForSpans(t, tr, tt.spans)
+			assert.Equal(t, tt.filtered, len(traces) == 0, tt.name)
 		})
 	}
 }
@@ -1148,6 +1339,133 @@ func TestTraces_GRPCStatus(t *testing.T) {
 	})
 }
 
+func TestHostPeerAttributes(t *testing.T) {
+	// Metrics
+	tests := []struct {
+		name   string
+		span   request.Span
+		client string
+		server string
+	}{
+		{
+			name:   "Same namespaces HTTP",
+			span:   request.Span{Type: request.EventTypeHTTP, PeerName: "client", HostName: "server", OtherNamespace: "same", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client",
+			server: "server",
+		},
+		{
+			name:   "Client in different namespace",
+			span:   request.Span{Type: request.EventTypeHTTP, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client.far",
+			server: "server",
+		},
+		{
+			name:   "Same namespaces for HTTP client",
+			span:   request.Span{Type: request.EventTypeHTTPClient, PeerName: "client", HostName: "server", OtherNamespace: "same", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client",
+			server: "server",
+		},
+		{
+			name:   "Server in different namespace ",
+			span:   request.Span{Type: request.EventTypeHTTPClient, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client",
+			server: "server.far",
+		},
+		{
+			name:   "Same namespaces GRPC",
+			span:   request.Span{Type: request.EventTypeGRPC, PeerName: "client", HostName: "server", OtherNamespace: "same", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client",
+			server: "server",
+		},
+		{
+			name:   "Client in different namespace GRPC",
+			span:   request.Span{Type: request.EventTypeGRPC, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client.far",
+			server: "server",
+		},
+		{
+			name:   "Same namespaces for GRPC client",
+			span:   request.Span{Type: request.EventTypeGRPCClient, PeerName: "client", HostName: "server", OtherNamespace: "same", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client",
+			server: "server",
+		},
+		{
+			name:   "Server in different namespace GRPC",
+			span:   request.Span{Type: request.EventTypeGRPCClient, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "client",
+			server: "server.far",
+		},
+		{
+			name:   "Same namespaces for SQL client",
+			span:   request.Span{Type: request.EventTypeSQLClient, PeerName: "client", HostName: "server", OtherNamespace: "same", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "",
+			server: "server",
+		},
+		{
+			name:   "Server in different namespace SQL",
+			span:   request.Span{Type: request.EventTypeSQLClient, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "",
+			server: "server.far",
+		},
+		{
+			name:   "Same namespaces for Redis client",
+			span:   request.Span{Type: request.EventTypeRedisClient, PeerName: "client", HostName: "server", OtherNamespace: "same", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "",
+			server: "server",
+		},
+		{
+			name:   "Server in different namespace Redis",
+			span:   request.Span{Type: request.EventTypeRedisClient, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "",
+			server: "server.far",
+		},
+		{
+			name:   "Client in different namespace Redis",
+			span:   request.Span{Type: request.EventTypeRedisServer, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "",
+			server: "server",
+		},
+		{
+			name:   "Server in different namespace Kafka",
+			span:   request.Span{Type: request.EventTypeKafkaClient, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "",
+			server: "server.far",
+		},
+		{
+			name:   "Client in different namespace Kafka",
+			span:   request.Span{Type: request.EventTypeKafkaServer, PeerName: "client", HostName: "server", OtherNamespace: "far", Service: svc.Attrs{UID: svc.UID{Namespace: "same"}}},
+			client: "",
+			server: "server",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attrs := traceAttributes(&tt.span, nil)
+			if tt.server != "" {
+				var found attribute.KeyValue
+				for _, a := range attrs {
+					if a.Key == attribute.Key(attr.ServerAddr) {
+						found = a
+						assert.Equal(t, tt.server, a.Value.AsString())
+					}
+				}
+				assert.NotNil(t, found)
+			}
+			if tt.client != "" {
+				var found attribute.KeyValue
+				for _, a := range attrs {
+					if a.Key == attribute.Key(attr.ClientAddr) {
+						found = a
+						assert.Equal(t, tt.client, a.Value.AsString())
+					}
+				}
+				assert.NotNil(t, found)
+			}
+		})
+	}
+}
+
 func makeSQLRequestSpan(sql string) request.Span {
 	method, path := sqlprune.SQLParseOperationAndTable(sql)
 	return request.Span{Type: request.EventTypeSQLClient, Method: method, Path: path, Statement: sql}
@@ -1172,6 +1490,21 @@ func makeTracesTestReceiver(instr []string) *tracesOTELReceiver {
 			ReportersCacheLen: 16,
 			Instrumentations:  instr,
 		},
+		false,
+		&global.ContextInfo{},
+		attributes.Selection{},
+	)
+}
+
+func makeTracesTestReceiverWithSpanMetrics(instr []string) *tracesOTELReceiver {
+	return makeTracesReceiver(context.Background(),
+		TracesConfig{
+			CommonEndpoint:    "http://something",
+			BatchTimeout:      10 * time.Millisecond,
+			ReportersCacheLen: 16,
+			Instrumentations:  instr,
+		},
+		true,
 		&global.ContextInfo{},
 		attributes.Selection{},
 	)
@@ -1183,11 +1516,32 @@ func generateTracesForSpans(t *testing.T, tr *tracesOTELReceiver, spans []reques
 	assert.NoError(t, err)
 	for i := range spans {
 		span := &spans[i]
-		if span.IgnoreTraces() || !tr.acceptSpan(span) {
+		if tr.spanDiscarded(span) {
 			continue
 		}
 		res = append(res, GenerateTraces(span, "host-id", traceAttrs, []attribute.KeyValue{}))
 	}
 
 	return res
+}
+
+type TestExporter struct {
+	collector func(td ptrace.Traces)
+}
+
+func (e TestExporter) Start(_ context.Context, _ component.Host) error {
+	return nil
+}
+
+func (e TestExporter) Shutdown(_ context.Context) error {
+	return nil
+}
+
+func (e TestExporter) ConsumeTraces(_ context.Context, td ptrace.Traces) error {
+	e.collector(td)
+	return nil
+}
+
+func (e TestExporter) Capabilities() consumer.Capabilities {
+	return consumer.Capabilities{}
 }

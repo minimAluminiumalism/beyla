@@ -9,18 +9,16 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
-	"golang.org/x/sys/unix"
 
-	"github.com/grafana/beyla/pkg/internal/goexec"
-	"github.com/grafana/beyla/pkg/internal/helpers"
-	"github.com/grafana/beyla/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/config"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
 )
 
-//go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -target amd64,arm64 -type http_request_trace -type sql_request_trace -type http_info_t -type connection_info_t -type http2_grpc_request_t -type tcp_req_t -type kafka_client_req_t -type kafka_go_req_t  -type redis_client_req_t bpf ../../../../bpf/http_trace.c -- -I../../../../bpf/headers
+//go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -target amd64,arm64 -type http_request_trace -type sql_request_trace -type http_info_t -type connection_info_t -type http2_grpc_request_t -type tcp_req_t -type kafka_client_req_t -type kafka_go_req_t  -type redis_client_req_t bpf ../../../../bpf/tracer_common.c -- -I../../../../bpf/headers
 
 // HTTPRequestTrace contains information from an HTTP request as directly received from the
 // eBPF layer. This contains low-level C structures for accurate binary read from ring buffer.
@@ -45,56 +43,45 @@ var IntegrityModeOverride = false
 
 var ActiveNamespaces = make(map[uint32]uint32)
 
-// TracerConfig configuration for eBPF programs
-type TracerConfig struct {
-	BpfDebug bool `yaml:"bpf_debug" env:"BEYLA_BPF_DEBUG"`
-
-	// WakeupLen specifies how many messages need to be accumulated in the eBPF ringbuffer
-	// before sending a wakeup request.
-	// High values of WakeupLen could add a noticeable metric delay in services with low
-	// requests/second.
-	// TODO: see if there is a way to force eBPF to wakeup userspace on timeout
-	WakeupLen int `yaml:"wakeup_len" env:"BEYLA_BPF_WAKEUP_LEN"`
-	// BatchLength allows specifying how many traces will be batched at the initial
-	// stage before being forwarded to the next stage
-	BatchLength int `yaml:"batch_length" env:"BEYLA_BPF_BATCH_LENGTH"`
-	// BatchTimeout specifies the timeout to forward the data batch if it didn't
-	// reach the BatchLength size
-	BatchTimeout time.Duration `yaml:"batch_timeout" env:"BEYLA_BPF_BATCH_TIMEOUT"`
-
-	// BpfBaseDir specifies the base directory where the BPF pinned maps will be mounted.
-	// By default, it will be /var/run/beyla
-	BpfBaseDir string `yaml:"bpf_fs_base_dir" env:"BEYLA_BPF_FS_BASE_DIR"`
-
-	// BpfPath specifies the path in the base directory where the BPF pinned maps will be mounted.
-	// By default, it will be beyla-<pid>.
-	BpfPath string `yaml:"bpf_fs_path" env:"BEYLA_BPF_FS_PATH"`
-
-	// If enabled, the kprobes based HTTP request tracking will start tracking the request
-	// headers to process any 'Traceparent' fields.
-	TrackRequestHeaders bool `yaml:"track_request_headers" env:"BEYLA_BPF_TRACK_REQUEST_HEADERS"`
-
-	HTTPRequestTimeout time.Duration `yaml:"http_request_timeout" env:"BEYLA_BPF_HTTP_REQUEST_TIMEOUT"`
-}
-
-// Probe holds the information of the instrumentation points of a given function: its start and end offsets and
-// eBPF programs
-type Probe struct {
-	Offsets  goexec.FuncOffsets
-	Programs FunctionPrograms
-}
-
-type FunctionPrograms struct {
+// ProbeDesc holds the information of the instrumentation points of a given
+// function/symbol
+type ProbeDesc struct {
 	// Required, if true, will cancel the execution of the eBPF Tracer
 	// if the function has not been found in the executable
 	Required bool
-	Start    *ebpf.Program
-	End      *ebpf.Program
+
+	// The eBPF program to attach to the symbol as a uprobe (either to the
+	// symbol name or to StartOffset)
+	Start *ebpf.Program
+
+	// The eBPF program to attach to the symbol either as a uretprobe or as a
+	// uprobe to ReturnOffsets
+	End *ebpf.Program
+
+	// Optional offset to the start of the symbol
+	StartOffset uint64
+
+	// Optional list of the offsets of every RET instruction in the symbol
+	ReturnOffsets []uint64
 }
 
 type Filter struct {
 	io.Closer
 	Fd int
+}
+
+type SockOps struct {
+	io.Closer
+	Program       *ebpf.Program
+	AttachAs      ebpf.AttachType
+	SockopsCgroup link.Link
+}
+
+type SockMsg struct {
+	io.Closer
+	Program  *ebpf.Program
+	MapFD    int
+	AttachAs ebpf.AttachType
 }
 
 type MisclassifiedEvent struct {
@@ -106,7 +93,7 @@ var MisclassifiedEvents = make(chan MisclassifiedEvent)
 
 func ptlog() *slog.Logger { return slog.With("component", "ebpf.ProcessTracer") }
 
-func ReadBPFTraceAsSpan(record *ringbuf.Record, filter ServiceFilter) (request.Span, bool, error) {
+func ReadBPFTraceAsSpan(cfg *config.EBPFTracer, record *ringbuf.Record, filter ServiceFilter) (request.Span, bool, error) {
 	var eventType uint8
 
 	// we read the type first, depending on the type we decide what kind of record we have
@@ -123,7 +110,7 @@ func ReadBPFTraceAsSpan(record *ringbuf.Record, filter ServiceFilter) (request.S
 	case EventTypeKHTTP2:
 		return ReadHTTP2InfoIntoSpan(record, filter)
 	case EventTypeTCP:
-		return ReadTCPRequestIntoSpan(record, filter)
+		return ReadTCPRequestIntoSpan(cfg, record, filter)
 	case EventTypeGoSarama:
 		return ReadGoSaramaRequestIntoSpan(record)
 	case EventTypeGoRedis:
@@ -160,33 +147,37 @@ const (
 	KernelLockdownOther
 )
 
-func SupportsContextPropagation(log *slog.Logger) bool {
+func SupportsContextPropagationWithProbe(log *slog.Logger) bool {
 	kernelMajor, kernelMinor := KernelVersion()
 	log.Debug("Linux kernel version", "major", kernelMajor, "minor", kernelMinor)
 
 	if kernelMajor < 5 || (kernelMajor == 5 && kernelMinor < 10) {
-		log.Debug("Found Linux kernel earlier than 5.10, trace context propagation is supported", "major", kernelMajor, "minor", kernelMinor)
+		log.Debug("Found Linux kernel earlier than 5.10, Go trace context propagation at library level is supported", "major", kernelMajor, "minor", kernelMinor)
 		return true
 	}
 
 	// bpf_probe_write_user(), used to inject the context, requires CAP_SYS_ADMIN
 
 	if !hasCapSysAdmin() {
-		log.Info("trace context propagation disabled due to missing capability CAP_SYS_ADMIN")
+		log.Info("Go context propagation at library level disabled due to missing capability CAP_SYS_ADMIN")
 		return false
 	}
 
 	lockdown := KernelLockdownMode()
 
 	if lockdown == KernelLockdownNone {
-		log.Debug("Kernel not in lockdown mode, trace context propagation is supported.")
+		log.Debug("Kernel not in lockdown mode, Go trace context propagation at library level is supported.")
 		return true
 	}
 
 	return false
 }
 
-func SupportsEBPFLoops() bool {
+func SupportsEBPFLoops(log *slog.Logger, overrideKernelVersion bool) bool {
+	if overrideKernelVersion {
+		log.Debug("Skipping kernel version check for bpf_loop functionality: user supplied confirmation of support")
+		return true
+	}
 	kernelMajor, kernelMinor := KernelVersion()
 	return kernelMajor > 5 || (kernelMajor == 5 && kernelMinor >= 17)
 }
@@ -228,11 +219,6 @@ func KernelLockdownMode() KernelLockdown {
 
 	plog.Debug("can't find /sys/kernel/security/lockdown, assuming no lockdown")
 	return KernelLockdownNone
-}
-
-func hasCapSysAdmin() bool {
-	caps, err := helpers.GetCurrentProcCapabilities()
-	return err == nil && caps.Has(unix.CAP_SYS_ADMIN)
 }
 
 func cstr(chars []uint8) string {

@@ -5,19 +5,19 @@ import (
 
 	"github.com/mariomac/pipes/pipe"
 
-	"github.com/grafana/beyla/pkg/beyla"
-	"github.com/grafana/beyla/pkg/export/alloy"
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
-	"github.com/grafana/beyla/pkg/export/debug"
-	"github.com/grafana/beyla/pkg/export/otel"
-	"github.com/grafana/beyla/pkg/export/prom"
-	"github.com/grafana/beyla/pkg/internal/filter"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/traces"
-	"github.com/grafana/beyla/pkg/transform"
+	"github.com/grafana/beyla/v2/pkg/beyla"
+	"github.com/grafana/beyla/v2/pkg/export/alloy"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/export/debug"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/export/prom"
+	"github.com/grafana/beyla/v2/pkg/filter"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/traces"
+	"github.com/grafana/beyla/v2/pkg/transform"
 )
 
 // nodesMap provides the architecture of the whole processing pipeline:
@@ -39,6 +39,7 @@ type nodesMap struct {
 	Metrics     pipe.Final[[]request.Span]
 	Traces      pipe.Final[[]request.Span]
 	Prometheus  pipe.Final[[]request.Span]
+	BpfMetrics  pipe.Final[[]request.Span]
 	Printer     pipe.Final[[]request.Span]
 
 	ProcessReport pipe.Final[[]request.Span]
@@ -66,7 +67,9 @@ func otelMetrics(n *nodesMap) *pipe.Final[[]request.Span]                   { re
 func otelTraces(n *nodesMap) *pipe.Final[[]request.Span]                    { return &n.Traces }
 func printer(n *nodesMap) *pipe.Final[[]request.Span]                       { return &n.Printer }
 func prometheus(n *nodesMap) *pipe.Final[[]request.Span]                    { return &n.Prometheus }
-func processReport(n *nodesMap) *pipe.Final[[]request.Span]                 { return &n.ProcessReport }
+func bpfMetrics(n *nodesMap) *pipe.Final[[]request.Span]                    { return &n.BpfMetrics }
+
+func processReport(n *nodesMap) *pipe.Final[[]request.Span] { return &n.ProcessReport }
 
 // builder with injectable instantiators for unit testing
 type graphFunctions struct {
@@ -108,14 +111,15 @@ func newGraphBuilder(ctx context.Context, config *beyla.Config, ctxInfo *global.
 
 	pipe.AddMiddleProvider(gnb, router, transform.RoutesProvider(config.Routes))
 	pipe.AddMiddleProvider(gnb, kubernetes, transform.KubeDecoratorProvider(ctx, &config.Attributes.Kubernetes, ctxInfo))
-	pipe.AddMiddleProvider(gnb, nameResolver, transform.NameResolutionProvider(gb.ctxInfo, config.NameResolver))
+	pipe.AddMiddleProvider(gnb, nameResolver, transform.NameResolutionProvider(ctx, gb.ctxInfo, config.NameResolver))
 	pipe.AddMiddleProvider(gnb, attrFilter, filter.ByAttribute(config.Filters.Application, spanPtrPromGetters))
 	config.Metrics.Grafana = &gb.config.Grafana.OTLP
 	pipe.AddFinalProvider(gnb, otelMetrics, otel.ReportMetrics(ctx, gb.ctxInfo, &config.Metrics, config.Attributes.Select))
 	config.Traces.Grafana = &gb.config.Grafana.OTLP
-	pipe.AddFinalProvider(gnb, otelTraces, otel.TracesReceiver(ctx, config.Traces, gb.ctxInfo, config.Attributes.Select))
+	pipe.AddFinalProvider(gnb, otelTraces, otel.TracesReceiver(ctx, config.Traces, config.Metrics.SpanMetricsEnabled(), gb.ctxInfo, config.Attributes.Select))
 	pipe.AddFinalProvider(gnb, prometheus, prom.PrometheusEndpoint(ctx, gb.ctxInfo, &config.Prometheus, config.Attributes.Select))
-	pipe.AddFinalProvider(gnb, alloyTraces, alloy.TracesReceiver(ctx, gb.ctxInfo, &config.TracesReceiver, config.Attributes.Select))
+	pipe.AddFinalProvider(gnb, bpfMetrics, prom.BPFMetrics(ctx, gb.ctxInfo, &config.Prometheus))
+	pipe.AddFinalProvider(gnb, alloyTraces, alloy.TracesReceiver(ctx, gb.ctxInfo, &config.TracesReceiver, config.Metrics.SpanMetricsEnabled(), config.Attributes.Select))
 
 	pipe.AddFinalProvider(gnb, printer, debug.PrinterNode(config.TracePrinter))
 
@@ -152,7 +156,11 @@ type Instrumenter struct {
 func (i *Instrumenter) Run(ctx context.Context) {
 	go i.internalMetrics.Start(ctx)
 	i.graph.Start()
-	<-i.graph.Done()
+	// run until either the graph is finished or the context is cancelled
+	select {
+	case <-i.graph.Done():
+	case <-ctx.Done():
+	}
 }
 
 // spanPtrPromGetters adapts the invocation of SpanPromGetters to work with a request.Span value

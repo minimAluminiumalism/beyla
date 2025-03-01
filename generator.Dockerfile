@@ -1,41 +1,28 @@
-FROM ubuntu:latest
+FROM golang:alpine3.21 AS base
 
-ARG GOVERSION="1.22.2"
-
-ARG TARGETARCH
-
-RUN echo "using TARGETARCH: $TARGETARCH"
+ARG EBPF_VER
 
 # Installs dependencies that are required to compile eBPF programs
-RUN apt update -y
-RUN apt install -y curl git linux-headers-generic make llvm clang unzip
-RUN apt clean
+RUN apk add clang llvm19 curl
+RUN apk cache purge
+RUN go install github.com/cilium/ebpf/cmd/bpf2go@$EBPF_VER
 
 VOLUME ["/src"]
 
-WORKDIR /
-
-# Installs a fairly modern distribution of Go
-RUN curl -qL https://go.dev/dl/go$GOVERSION.linux-$TARGETARCH.tar.gz -o go.tar.gz
-RUN tar -xzf go.tar.gz
-RUN rm go.tar.gz
-
-ENV GOROOT /go
-RUN mkdir -p /gopath
-ENV GOPATH /gopath
-
-ENV GOBIN $GOPATH/bin
-ENV PATH $GOROOT/bin:$GOBIN:$PATH
-ENV TOOLS_DIR $GOBIN
-
-WORKDIR /tmp
-# Copies some pre-required Go dependencies to avoid downloading them on each build
-COPY Makefile Makefile
-COPY go.mod go.mod
-
-RUN make prereqs
-
 WORKDIR /src
 
-ENTRYPOINT ["make", "generate"]
+FROM base AS builder
+
+RUN cat <<EOF > /generate.sh
+#!/bin/sh
+export BPF2GO=bpf2go
+export BPF_CLANG=clang
+export BPF_CFLAGS="-O2 -g -Wall -Werror"
+export BEYLA_GENFILES_RUN_LOCALLY=1
+go run cmd/beyla-genfiles/beyla_genfiles.go
+EOF
+
+RUN chmod +x /generate.sh
+
+ENTRYPOINT ["/generate.sh"]
 

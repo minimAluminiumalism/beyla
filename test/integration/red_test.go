@@ -3,8 +3,11 @@
 package integration
 
 import (
+	"crypto/tls"
 	"fmt"
+	"io"
 	"math/rand"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -14,8 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/test/integration/components/prom"
-	grpcclient "github.com/grafana/beyla/test/integration/components/testserver/grpc/client"
+	"github.com/grafana/beyla/v2/test/integration/components/prom"
+	grpcclient "github.com/grafana/beyla/v2/test/integration/components/testserver/grpc/client"
 )
 
 const (
@@ -56,6 +59,7 @@ func testREDMetricsHTTP(t *testing.T) {
 			waitForTestComponents(t, testCaseURL)
 			testREDMetricsForHTTPLibrary(t, testCaseURL, "testserver", "integration-test")
 			testSpanMetricsForHTTPLibrary(t, "testserver", "integration-test")
+			testServiceGraphMetricsForHTTPLibrary(t, "integration-test")
 		})
 	}
 }
@@ -87,6 +91,31 @@ func testREDMetricsShortHTTP(t *testing.T) {
 			testSpanMetricsForHTTPLibrary(t, "testserver", "integration-test")
 		})
 	}
+}
+
+func testExemplarsExist(t *testing.T) {
+	url := "http://" + prometheusHostPort + "/api/v1/query_exemplars?query=http_server_request_duration_seconds_bucket"
+
+	var qtr = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	var qClient = &http.Client{Transport: qtr}
+
+	req, err := http.NewRequest("GET", url, nil)
+	require.NoError(t, err)
+	r, err := qClient.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, r.StatusCode)
+
+	// Read the response body
+	body, err := io.ReadAll(r.Body)
+	require.NoError(t, err)
+	defer r.Body.Close()
+
+	// Convert the body to a string
+	bodyStr := string(body)
+
+	assert.Contains(t, bodyStr, "exemplars", "The response body does not contain exemplars")
 }
 
 // **IMPORTANT** Tests must first call -> func testREDMetricsForHTTPLibrary(t *testing.T, url, svcName, svcNs string) {
@@ -139,6 +168,45 @@ func testSpanMetricsForHTTPLibrary(t *testing.T, svcName, svcNs string) {
 		val := totalPromCount(t, results)
 		assert.LessOrEqual(t, 1, val) // we report this count for each service, doesn't matter how many calls
 	})
+}
+
+// **IMPORTANT** Tests must first call -> func testREDMetricsForHTTPLibrary(t *testing.T, url, svcName, svcNs string) {
+func testServiceGraphMetricsForHTTPLibrary(t *testing.T, svcNs string) {
+	pq := prom.Client{HostPort: prometheusHostPort}
+	var results []prom.Result
+
+	// Test span metrics
+	test.Eventually(t, testTimeout, func(t require.TestingT) {
+		var err error
+		results, err = pq.Query(`traces_service_graph_request_server_seconds_count{` +
+			`service_namespace="` + svcNs + `"` +
+			`} or traces_service_graph_request_server_seconds_count{` +
+			`server_service_namespace="` + svcNs + `"}`)
+		require.NoError(t, err)
+		// check span metric latency exists
+		enoughPromResults(t, results)
+		val := totalPromCount(t, results)
+		assert.LessOrEqual(t, 3, val)
+	})
+
+	var err error
+	results, err = pq.Query(`traces_service_graph_request_server_seconds_count{` +
+		`client="127.0.0.1",` +
+		`server="127.0.0.1"` +
+		`}`)
+	require.NoError(t, err)
+	// check calls total to 0, no self references
+	val := totalPromCount(t, results)
+	assert.Equal(t, 0, val)
+
+	results, err = pq.Query(`traces_service_graph_request_server_seconds_count{` +
+		`client="::1",` +
+		`server="::1"` +
+		`}`)
+	require.NoError(t, err)
+	// check calls total to 0, no self references
+	val = totalPromCount(t, results)
+	assert.Equal(t, 0, val)
 }
 
 func testREDMetricsForHTTPLibrary(t *testing.T, url, svcName, svcNs string) {
@@ -681,6 +749,36 @@ func testPrometheusBeylaBuildInfo(t *testing.T) {
 	test.Eventually(t, testTimeout, func(t require.TestingT) {
 		var err error
 		results, err = pq.Query(`beyla_build_info{target_lang="go"}`)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+	})
+}
+
+func testHostInfo(t *testing.T) {
+	pq := prom.Client{HostPort: prometheusHostPort}
+	var results []prom.Result
+	test.Eventually(t, testTimeout, func(t require.TestingT) {
+		var err error
+		results, err = pq.Query(`traces_host_info{}`)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+	})
+}
+
+func testPrometheusBPFMetrics(t *testing.T) {
+	t.Skip("BPF metrics are not available in the test environment")
+	pq := prom.Client{HostPort: prometheusHostPort}
+	var results []prom.Result
+	test.Eventually(t, testTimeout, func(t require.TestingT) {
+		var err error
+		results, err = pq.Query(`bpf_probe_latency_seconds_count{probe_name=~"uprobe_.*"}`)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+	})
+
+	test.Eventually(t, testTimeout, func(t require.TestingT) {
+		var err error
+		results, err = pq.Query(`bpf_map_entries_total{map_name="ongoing_server_"}`)
 		require.NoError(t, err)
 		require.NotEmpty(t, results)
 	})

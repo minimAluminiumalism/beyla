@@ -9,15 +9,8 @@ import (
 	"github.com/mariomac/pipes/pipe"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/grafana/beyla/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
 )
-
-// TODO deprecated (REMOVE) - use TracePrinter instead
-type PrintEnabled bool
-
-func (p PrintEnabled) Enabled() bool {
-	return bool(p)
-}
 
 type TracePrinter string
 
@@ -78,6 +71,26 @@ func textPrinter(input <-chan []request.Span) {
 	for spans := range input {
 		for i := range spans {
 			t := spans[i].Timings()
+
+			pn := ""
+			hn := ""
+
+			if spans[i].IsClientSpan() {
+				if spans[i].Service.UID.Namespace != "" {
+					pn = "." + spans[i].Service.UID.Namespace
+				}
+				if spans[i].OtherNamespace != "" {
+					hn = "." + spans[i].OtherNamespace
+				}
+			} else {
+				if spans[i].OtherNamespace != "" {
+					pn = "." + spans[i].OtherNamespace
+				}
+				if spans[i].Service.UID.Namespace != "" {
+					hn = "." + spans[i].Service.UID.Namespace
+				}
+			}
+
 			fmt.Printf("%s (%s[%s]) %s %v %s %s [%s:%d]->[%s:%d] size:%dB svc=[%s %s] traceparent=[%s]\n",
 				t.Start.Format("2006-01-02 15:04:05.12345"),
 				t.End.Sub(t.RequestStart),
@@ -86,13 +99,13 @@ func textPrinter(input <-chan []request.Span) {
 				spans[i].Status,
 				spans[i].Method,
 				spans[i].Path,
-				spans[i].Peer+" as "+spans[i].PeerName,
+				spans[i].Peer+" as "+request.SpanPeer(&spans[i])+pn,
 				spans[i].PeerPort,
-				spans[i].Host+" as "+spans[i].HostName,
+				spans[i].Host+" as "+request.SpanHost(&spans[i])+hn,
 				spans[i].HostPort,
 				spans[i].ContentLength,
-				&spans[i].ServiceID,
-				spans[i].ServiceID.SDKLanguage.String(),
+				&spans[i].Service,
+				spans[i].Service.SDKLanguage.String(),
 				traceparent(&spans[i]),
 			)
 		}
@@ -112,7 +125,7 @@ func jsonPrinter(input <-chan []request.Span, indent bool) {
 		data, err := serializeSpansJSON(spans, indent)
 
 		if err != nil {
-			mlog().Error("Error serializing span to json")
+			mlog().Error("Error serializing span to json", "error", err)
 			continue
 		}
 
@@ -124,7 +137,7 @@ func traceparent(span *request.Span) string {
 	if !trace.TraceID(span.TraceID).IsValid() {
 		return ""
 	}
-	return fmt.Sprintf("00-%s-%s-%02x", trace.TraceID(span.TraceID).String(), trace.SpanID(span.ParentSpanID).String(), span.Flags)
+	return fmt.Sprintf("00-%s-%s[%s]-%02x", trace.TraceID(span.TraceID).String(), trace.SpanID(span.SpanID).String(), trace.SpanID(span.ParentSpanID).String(), span.Flags)
 }
 
 func makeCounterPrinter() pipe.FinalFunc[[]request.Span] {

@@ -15,23 +15,23 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.19.0"
 
-	"github.com/grafana/beyla/pkg/beyla"
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/export/otel"
-	"github.com/grafana/beyla/pkg/internal/filter"
-	"github.com/grafana/beyla/pkg/internal/imetrics"
-	"github.com/grafana/beyla/pkg/internal/kube"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
-	"github.com/grafana/beyla/pkg/internal/testutil"
-	"github.com/grafana/beyla/pkg/internal/traces"
-	"github.com/grafana/beyla/pkg/kubeflags"
-	"github.com/grafana/beyla/pkg/transform"
-	"github.com/grafana/beyla/test/collector"
-	"github.com/grafana/beyla/test/consumer"
+	"github.com/grafana/beyla/v2/pkg/beyla"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/filter"
+	"github.com/grafana/beyla/v2/pkg/internal/imetrics"
+	"github.com/grafana/beyla/v2/pkg/internal/kube"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/internal/testutil"
+	"github.com/grafana/beyla/v2/pkg/internal/traces"
+	"github.com/grafana/beyla/v2/pkg/kubeflags"
+	"github.com/grafana/beyla/v2/pkg/transform"
+	"github.com/grafana/beyla/v2/test/collector"
+	"github.com/grafana/beyla/v2/test/consumer"
 )
 
 const testTimeout = 5 * time.Second
@@ -40,7 +40,7 @@ func gctx(groups attributes.AttrGroups) *global.ContextInfo {
 	return &global.ContextInfo{
 		Metrics:               imetrics.NoopReporter{},
 		MetricAttributeGroups: groups,
-		K8sInformer:           kube.NewMetadataProvider(kubeflags.EnabledFalse, nil, "", 0),
+		K8sInformer:           kube.NewMetadataProvider(kube.MetadataConfig{Enable: kubeflags.EnabledFalse}),
 		HostID:                "host-id",
 	}
 }
@@ -95,6 +95,9 @@ func TestBasicPipeline(t *testing.T) {
 	event := testutil.ReadChannel(t, tc.Records(), testTimeout)
 	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
 	delete(event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.Equal(t, collector.MetricRecord{
 		Name: "http.server.request.duration",
 		Unit: "s",
@@ -303,6 +306,8 @@ func TestRouteConsolidation(t *testing.T) {
 	for _, event := range events {
 		assert.NotEmpty(t, event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
 		delete(event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
+		assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+		delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
 	}
 	assert.Equal(t, collector.MetricRecord{
 		Name: "http.server.request.duration",
@@ -415,6 +420,9 @@ func TestGRPCPipeline(t *testing.T) {
 	event := testutil.ReadChannel(t, tc.Records(), testTimeout)
 	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
 	delete(event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.Equal(t, collector.MetricRecord{
 		Name: "rpc.server.duration",
 		Unit: "s",
@@ -509,6 +517,9 @@ func TestBasicPipelineInfo(t *testing.T) {
 	event := testutil.ReadChannel(t, tc.Records(), testTimeout)
 	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
 	delete(event.ResourceAttributes, string(semconv.ServiceInstanceIDKey))
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.Equal(t, collector.MetricRecord{
 		Name: "http.server.request.duration",
 		Unit: "s",
@@ -599,17 +610,14 @@ func TestSpanAttributeFilterNode(t *testing.T) {
 
 	// expect to receive only the records matching the Filters criteria
 	events := map[string]map[string]string{}
-	var event collector.MetricRecord
-	test.Eventually(t, testTimeout, func(tt require.TestingT) {
-		event = testutil.ReadChannel(t, tc.Records(), testTimeout)
-		require.Equal(tt, "http.server.request.duration", event.Name)
-	})
-	events[event.Attributes["url.path"]] = event.Attributes
-	test.Eventually(t, testTimeout, func(tt require.TestingT) {
-		event = testutil.ReadChannel(t, tc.Records(), testTimeout)
-		require.Equal(tt, "http.server.request.duration", event.Name)
-	})
-	events[event.Attributes["url.path"]] = event.Attributes
+	for i := 0; i < 10; i++ {
+		var event collector.MetricRecord
+		test.Eventually(t, testTimeout, func(tt require.TestingT) {
+			event = testutil.ReadChannel(t, tc.Records(), testTimeout)
+			require.Equal(tt, "http.server.request.duration", event.Name)
+		})
+		events[event.Attributes["url.path"]] = event.Attributes
+	}
 
 	assert.Equal(t, map[string]map[string]string{
 		"/user/1234": {
@@ -647,7 +655,7 @@ func newRequest(serviceName string, method, path, peer string, status int) []req
 		Start:        2,
 		RequestStart: 1,
 		End:          3,
-		ServiceID:    svc.ID{HostName: "the-host", Namespace: "ns", Name: serviceName},
+		Service:      svc.Attrs{HostName: "the-host", UID: svc.UID{Namespace: "ns", Name: serviceName}, SDKLanguage: svc.InstrumentableGolang},
 	}}
 }
 
@@ -663,7 +671,7 @@ func newRequestWithTiming(svcName string, kind request.EventType, method, path, 
 		RequestStart: int64(goStart),
 		Start:        int64(start),
 		End:          int64(end),
-		ServiceID:    svc.ID{HostName: "the-host", Name: svcName},
+		Service:      svc.Attrs{HostName: "the-host", UID: svc.UID{Name: svcName}, SDKLanguage: svc.InstrumentableGolang},
 	}}
 }
 
@@ -678,7 +686,7 @@ func newGRPCRequest(svcName string, path string, status int) []request.Span {
 		Start:        2,
 		RequestStart: 1,
 		End:          3,
-		ServiceID:    svc.ID{HostName: "the-host", Name: svcName},
+		Service:      svc.Attrs{HostName: "the-host", UID: svc.UID{Name: svcName}, SDKLanguage: svc.InstrumentableGolang},
 	}}
 }
 
@@ -691,6 +699,9 @@ func getHostname() string {
 }
 
 func matchTraceEvent(t require.TestingT, name string, event collector.TraceRecord) {
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.NotEmpty(t, event.Attributes["span_id"])
 	assert.Equal(t, collector.TraceRecord{
 		Name: name,
@@ -719,6 +730,9 @@ func matchTraceEvent(t require.TestingT, name string, event collector.TraceRecor
 }
 
 func matchInnerTraceEvent(t require.TestingT, name string, event collector.TraceRecord) {
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.NotEmpty(t, event.Attributes["span_id"])
 	assert.Equal(t, collector.TraceRecord{
 		Name: name,
@@ -740,6 +754,9 @@ func matchInnerTraceEvent(t require.TestingT, name string, event collector.Trace
 }
 
 func matchGRPCTraceEvent(t *testing.T, name string, event collector.TraceRecord) {
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.Equal(t, collector.TraceRecord{
 		Name: name,
 		Attributes: map[string]string{
@@ -765,6 +782,9 @@ func matchGRPCTraceEvent(t *testing.T, name string, event collector.TraceRecord)
 }
 
 func matchInnerGRPCTraceEvent(t *testing.T, name string, event collector.TraceRecord) {
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.Equal(t, collector.TraceRecord{
 		Name: name,
 		Attributes: map[string]string{
@@ -807,11 +827,14 @@ func newHTTPInfo(method, path, peer string, status int) []request.Span {
 		Start:        2,
 		RequestStart: 2,
 		End:          3,
-		ServiceID:    svc.ID{HostName: "the-host", Name: "comm"},
+		Service:      svc.Attrs{HostName: "the-host", UID: svc.UID{Name: "comm"}, SDKLanguage: svc.InstrumentableGolang},
 	}}
 }
 
 func matchInfoEvent(t *testing.T, name string, event collector.TraceRecord) {
+	assert.NotEmpty(t, event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+	delete(event.ResourceAttributes, string(semconv.TelemetrySDKVersionKey))
+
 	assert.Equal(t, collector.TraceRecord{
 		Name: name,
 		Attributes: map[string]string{

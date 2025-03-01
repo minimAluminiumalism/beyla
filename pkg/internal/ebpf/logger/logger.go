@@ -11,9 +11,10 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 
-	"github.com/grafana/beyla/pkg/beyla"
-	ebpfcommon "github.com/grafana/beyla/pkg/internal/ebpf/common"
-	"github.com/grafana/beyla/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/beyla"
+	"github.com/grafana/beyla/v2/pkg/config"
+	ebpfcommon "github.com/grafana/beyla/v2/pkg/internal/ebpf/common"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
 )
 
 //go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -type log_info_t -target amd64,arm64 bpf_debug ../../../../bpf/debug_log.c -- -I../../../../bpf/headers -DBPF_DEBUG
@@ -54,11 +55,11 @@ func (p *BPFLogger) AddCloser(c ...io.Closer) {
 	p.closers = append(p.closers, c...)
 }
 
-func (p *BPFLogger) KProbes() map[string]ebpfcommon.FunctionPrograms {
+func (p *BPFLogger) KProbes() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
-func (p *BPFLogger) Tracepoints() map[string]ebpfcommon.FunctionPrograms {
+func (p *BPFLogger) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 	return nil
 }
 
@@ -76,7 +77,7 @@ func (p *BPFLogger) Run(ctx context.Context) {
 	)(ctx, nil)
 }
 
-func (p *BPFLogger) processLogEvent(record *ringbuf.Record, _ ebpfcommon.ServiceFilter) (request.Span, bool, error) {
+func (p *BPFLogger) processLogEvent(_ *config.EBPFTracer, record *ringbuf.Record, _ ebpfcommon.ServiceFilter) (request.Span, bool, error) {
 	var event BPFLogInfo
 
 	err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event)

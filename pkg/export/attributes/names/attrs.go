@@ -44,7 +44,7 @@ const (
 	ConnectionType         = Name("connection_type")
 	DBOperation            = Name("db.operation.name")
 	DBCollectionName       = Name("db.collection.name")
-	DBSystem               = Name(semconv.DBSystemKey)
+	DBSystemName           = Name("db.system.name")
 	ErrorType              = Name("error.type")
 	RPCMethod              = Name(semconv.RPCMethodKey)
 	RPCSystem              = Name(semconv.RPCSystemKey)
@@ -54,16 +54,17 @@ const (
 	MessagingSystem        = Name(semconv.MessagingSystemKey)
 	MessagingDestination   = Name(semconv.MessagingDestinationNameKey)
 
-	K8sNamespaceName    = Name("k8s.namespace.name")
-	K8sPodName          = Name("k8s.pod.name")
-	K8sDeploymentName   = Name("k8s.deployment.name")
-	K8sReplicaSetName   = Name("k8s.replicaset.name")
-	K8sDaemonSetName    = Name("k8s.daemonset.name")
-	K8sStatefulSetName  = Name("k8s.statefulset.name")
-	K8sUnknownOwnerName = Name("k8s.owner.name")
-	K8sNodeName         = Name("k8s.node.name")
-	K8sPodUID           = Name("k8s.pod.uid")
-	K8sPodStartTime     = Name("k8s.pod.start_time")
+	K8sNamespaceName   = Name("k8s.namespace.name")
+	K8sPodName         = Name("k8s.pod.name")
+	K8sContainerName   = Name("k8s.container.name")
+	K8sDeploymentName  = Name("k8s.deployment.name")
+	K8sReplicaSetName  = Name("k8s.replicaset.name")
+	K8sDaemonSetName   = Name("k8s.daemonset.name")
+	K8sStatefulSetName = Name("k8s.statefulset.name")
+	K8sOwnerName       = Name("k8s.owner.name")
+	K8sNodeName        = Name("k8s.node.name")
+	K8sPodUID          = Name("k8s.pod.uid")
+	K8sPodStartTime    = Name("k8s.pod.start_time")
 )
 
 // Beyla-specific network attributes
@@ -79,6 +80,8 @@ const (
 	Iface      = Name("iface")
 	SrcCIDR    = Name("src.cidr")
 	DstCIDR    = Name("dst.cidr")
+	SrcZone    = Name("src.zone")
+	DstZone    = Name("dst.zone")
 
 	ClientPort = Name("client.port")
 
@@ -111,7 +114,7 @@ const (
 const (
 	ProcCommand     = Name(semconv.ProcessCommandKey)
 	ProcCommandLine = Name(semconv.ProcessCommandLineKey)
-	ProcCPUState    = Name("process.cpu.state")
+	ProcCPUMode     = Name("cpu.mode")
 	ProcDiskIODir   = Name(semconv2.DiskIoDirectionKey)
 	ProcNetIODir    = Name(semconv2.NetworkIoDirectionKey)
 	ProcOwner       = Name(semconv.ProcessOwnerKey)
@@ -124,13 +127,13 @@ const (
 
 // other beyla-specific attributes
 const (
-	// TargetInstance is a Prometheus-only attribute.
-	// It will expose the process hostname-pid (or K8s Pod).
-	// It is advised for users that to use relabeling rules to
-	// override the "instance" attribute with "target" in the
-	// Prometheus server. This would be similar to the "multi target pattern":
-	// https://prometheus.io/docs/guides/multi-target-exporter/
-	TargetInstance = Name("target.instance")
+	// Instance and Job are only explicitly used in the Prometheus
+	// exporter, as the OpenTelemetry SDK already sets them implicitly.
+	// It is advised for users to configure their Prometheus scraper with
+	// the `honor_labels` option set to true, to avoid overwriting the
+	// instance attribute with the target attribute.
+	Instance = Name("instance")
+	Job      = Name("job")
 
 	// ServiceName and ServiceNamespace are going to be used only on Prometheus
 	// as metric attributes. The OTEL exporter already uses them as Resource
@@ -142,10 +145,17 @@ const (
 	HostID   = Name(semconv.HostIDKey)
 
 	ServiceInstanceID = Name(semconv.ServiceInstanceIDKey)
+	SkipSpanMetrics   = Name("span.metrics.skip")
 )
 
 // traces related attributes
 const (
 	// SQL
 	DBQueryText = Name("db.query.text")
+)
+
+// Beyla specific GPU events
+const (
+	// GPU/Cuda related attributes
+	CudaKernelName = Name("cuda.kernel.name")
 )

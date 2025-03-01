@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/grafana/beyla/test/integration/components/docker"
-	"github.com/grafana/beyla/test/integration/components/jaeger"
-	"github.com/grafana/beyla/test/integration/components/prom"
+	"github.com/grafana/beyla/v2/test/integration/components/docker"
+	"github.com/grafana/beyla/v2/test/integration/components/jaeger"
+	"github.com/grafana/beyla/v2/test/integration/components/prom"
 )
 
 func testREDMetricsForHTTP2Library(t *testing.T, route, svcNs string) {
@@ -178,11 +178,5 @@ func TestHTTP2Go(t *testing.T) {
 		})
 	}
 
-	t.Run("BPF pinning folders mounted", func(t *testing.T) {
-		// 1 beyla pinned map folder for all processes
-		testBPFPinningMounted(t)
-	})
-
 	require.NoError(t, compose.Close())
-	t.Run("BPF pinning folder unmounted", testBPFPinningUnmounted)
 }

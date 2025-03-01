@@ -5,7 +5,7 @@ package otel
 import (
 	"testing"
 
-	k8s "github.com/grafana/beyla/test/integration/k8s/common"
+	k8s "github.com/grafana/beyla/v2/test/integration/k8s/common"
 )
 
 // Run it alphabetically first (AA-prefix), with a longer timeout, to wait until all the components are up and
@@ -15,11 +15,11 @@ func TestOTEL_MetricsDecoration_AA_WaitForComponents(t *testing.T) {
 }
 
 func TestOTEL_MetricsDecoration_HTTP(t *testing.T) {
-	cluster.TestEnv().Test(t, k8s.FeatureHTTPMetricsDecoration(k8s.PingerManifest))
+	cluster.TestEnv().Test(t, k8s.FeatureHTTPMetricsDecoration(k8s.PingerManifest, nil))
 }
 
 func TestOTEL_MetricsDecoration_GRPC(t *testing.T) {
-	cluster.TestEnv().Test(t, k8s.FeatureGRPCMetricsDecoration(k8s.GrpcPingerManifest))
+	cluster.TestEnv().Test(t, k8s.FeatureGRPCMetricsDecoration(k8s.GrpcPingerManifest, nil))
 }
 
 func TestOTEL_ProcessMetrics(t *testing.T) {

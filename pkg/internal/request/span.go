@@ -4,15 +4,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/gavv/monotime"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	trace2 "go.opentelemetry.io/otel/trace"
 
-	"github.com/grafana/beyla/pkg/internal/svc"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 type EventType uint8
@@ -20,7 +23,9 @@ type EventType uint8
 // The following consts need to coincide with some C identifiers:
 // EVENT_HTTP_REQUEST, EVENT_GRPC_REQUEST, EVENT_HTTP_CLIENT, EVENT_GRPC_CLIENT, EVENT_SQL_CLIENT
 const (
-	EventTypeHTTP EventType = iota + 1
+	// EventTypeProcessAlive is an internal signal. It will be ignored by the metrics exporters.
+	EventTypeProcessAlive EventType = iota
+	EventTypeHTTP
 	EventTypeGRPC
 	EventTypeHTTPClient
 	EventTypeGRPCClient
@@ -29,10 +34,34 @@ const (
 	EventTypeKafkaClient
 	EventTypeRedisServer
 	EventTypeKafkaServer
+	EventTypeGPUKernelLaunch
+	EventTypeGPUMalloc
 )
 
+const (
+	metricsDetectPattern     = "/v1/metrics"
+	grpcMetricsDetectPattern = "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export"
+	tracesDetectPattern      = "/v1/traces"
+	grpcTracesDetectPattern  = "/opentelemetry.proto.collector.trace.v1.TraceService/Export"
+)
+
+const (
+	SchemeHostSeparator = ";"
+)
+
+type SQLKind uint8
+
+const (
+	DBGeneric SQLKind = iota + 1
+	DBPostgres
+	DBMySQL
+)
+
+//nolint:cyclop
 func (t EventType) String() string {
 	switch t {
+	case EventTypeProcessAlive:
+		return "ProcessAlive"
 	case EventTypeHTTP:
 		return "HTTP"
 	case EventTypeGRPC:
@@ -51,6 +80,10 @@ func (t EventType) String() string {
 		return "RedisServer"
 	case EventTypeKafkaServer:
 		return "KafkaServer"
+	case EventTypeGPUKernelLaunch:
+		return "CUDALaunch"
+	case EventTypeGPUMalloc:
+		return "CUDAMalloc"
 	default:
 		return fmt.Sprintf("UNKNOWN (%d)", t)
 	}
@@ -126,7 +159,7 @@ type Span struct {
 	RequestStart   int64          `json:"-"`
 	Start          int64          `json:"-"`
 	End            int64          `json:"-"`
-	ServiceID      svc.ID         `json:"-"` // TODO: rename to Service or ResourceAttrs
+	Service        svc.Attrs      `json:"-"`
 	TraceID        trace2.TraceID `json:"traceID"`
 	SpanID         trace2.SpanID  `json:"spanID"`
 	ParentSpanID   trace2.SpanID  `json:"parentSpanID"`
@@ -136,10 +169,17 @@ type Span struct {
 	HostName       string         `json:"hostName"`
 	OtherNamespace string         `json:"-"`
 	Statement      string         `json:"-"`
+	SubType        int            `json:"-"`
 }
 
 func (s *Span) Inside(parent *Span) bool {
 	return s.RequestStart >= parent.RequestStart && s.End <= parent.End
+}
+
+// InternalSignal returns whether a span is not aimed to be exported as a metric
+// or a trace, because it's used to internally send messages through the pipeline.
+func (s *Span) InternalSignal() bool {
+	return s.Type == EventTypeProcessAlive
 }
 
 // helper attribute functions used by JSON serialization
@@ -204,6 +244,15 @@ func spanAttributes(s *Span) SpanAttributes {
 			"serverPort": strconv.Itoa(s.HostPort),
 			"operation":  s.Method,
 			"clientId":   s.OtherNamespace,
+		}
+	case EventTypeGPUKernelLaunch:
+		return SpanAttributes{
+			"function":  s.Method,
+			"callStack": s.Path,
+		}
+	case EventTypeGPUMalloc:
+		return SpanAttributes{
+			"size": strconv.FormatInt(s.ContentLength, 10),
 		}
 	}
 
@@ -330,6 +379,10 @@ func SpanStatusCode(span *Span) codes.Code {
 
 // https://opentelemetry.io/docs/specs/otel/trace/semantic_conventions/http/#status
 func HTTPSpanStatusCode(span *Span) codes.Code {
+	if span.Status == 0 {
+		return codes.Error
+	}
+
 	if span.Status < 400 {
 		return codes.Unset
 	}
@@ -426,4 +479,78 @@ func (s *Span) TraceName() string {
 		return fmt.Sprintf("%s %s", s.Path, s.Method)
 	}
 	return ""
+}
+
+func (s *Span) isHTTPOrGRPCClient() bool {
+	return s.Type == EventTypeHTTPClient || s.Type == EventTypeGRPCClient
+}
+
+func (s *Span) isMetricsExportURL() bool {
+	switch s.Type {
+	case EventTypeGRPCClient:
+		return strings.HasPrefix(s.Path, grpcMetricsDetectPattern)
+	case EventTypeHTTPClient:
+		return strings.HasSuffix(s.Path, metricsDetectPattern)
+	default:
+		return false
+	}
+}
+
+func (s *Span) isTracesExportURL() bool {
+	switch s.Type {
+	case EventTypeGRPCClient:
+		return strings.HasPrefix(s.Path, grpcTracesDetectPattern)
+	case EventTypeHTTPClient:
+		return strings.HasSuffix(s.Path, tracesDetectPattern)
+	default:
+		return false
+	}
+}
+
+func (s *Span) IsExportMetricsSpan() bool {
+	// check if it's a successful client call
+	if !s.isHTTPOrGRPCClient() || (SpanStatusCode(s) != codes.Unset) {
+		return false
+	}
+
+	return s.isMetricsExportURL()
+}
+
+func (s *Span) IsExportTracesSpan() bool {
+	// check if it's a successful client call
+	if !s.isHTTPOrGRPCClient() || (SpanStatusCode(s) != codes.Unset) {
+		return false
+	}
+
+	return s.isTracesExportURL()
+}
+
+func (s *Span) IsSelfReferenceSpan() bool {
+	return s.Peer == s.Host && (s.Service.UID.Namespace == s.OtherNamespace || s.OtherNamespace == "")
+}
+
+// TODO: replace by semconv.DBSystemPostgreSQL, semconv.DBSystemMySQL, semconv.DBSystemRedis when we
+// update semantic conventions library to 1.30.0
+var (
+	dbSystemPostgreSQL = attribute.String(string(attr.DBSystemName), semconv.DBSystemPostgreSQL.Value.AsString())
+	dbSystemMySQL      = attribute.String(string(attr.DBSystemName), semconv.DBSystemMySQL.Value.AsString())
+	dbSystemOtherSQL   = attribute.String(string(attr.DBSystemName), semconv.DBSystemOtherSQL.Value.AsString())
+)
+
+func (s *Span) DBSystemName() attribute.KeyValue {
+	if s.Type == EventTypeSQLClient {
+		switch s.SubType {
+		case int(DBPostgres):
+			return dbSystemPostgreSQL
+		case int(DBMySQL):
+			return dbSystemMySQL
+		}
+	}
+
+	return dbSystemOtherSQL
+}
+
+func (s *Span) HasOriginalHost() bool {
+	schemeHost := strings.Split(s.Statement, SchemeHostSeparator)
+	return len(schemeHost) > 1 && schemeHost[1] != ""
 }

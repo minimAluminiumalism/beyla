@@ -13,16 +13,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/codes"
 
-	"github.com/grafana/beyla/pkg/buildinfo"
-	"github.com/grafana/beyla/pkg/export/attributes"
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
-	"github.com/grafana/beyla/pkg/export/expire"
-	"github.com/grafana/beyla/pkg/export/instrumentations"
-	"github.com/grafana/beyla/pkg/export/otel"
-	"github.com/grafana/beyla/pkg/internal/connector"
-	"github.com/grafana/beyla/pkg/internal/pipe/global"
-	"github.com/grafana/beyla/pkg/internal/request"
-	"github.com/grafana/beyla/pkg/internal/svc"
+	"github.com/grafana/beyla/v2/pkg/buildinfo"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
+	"github.com/grafana/beyla/v2/pkg/export/expire"
+	"github.com/grafana/beyla/v2/pkg/export/instrumentations"
+	"github.com/grafana/beyla/v2/pkg/export/otel"
+	"github.com/grafana/beyla/v2/pkg/internal/connector"
+	"github.com/grafana/beyla/v2/pkg/internal/pipe/global"
+	"github.com/grafana/beyla/v2/pkg/internal/request"
+	"github.com/grafana/beyla/v2/pkg/internal/svc"
 )
 
 // injectable function reference for testing
@@ -35,6 +35,7 @@ const (
 	SpanMetricsCalls   = "traces_spanmetrics_calls_total"
 	SpanMetricsSizes   = "traces_spanmetrics_size_total"
 	TracesTargetInfo   = "traces_target_info"
+	TracesHostInfo     = "traces_host_info"
 	TargetInfo         = "target_info"
 
 	ServiceGraphClient = "traces_service_graph_request_client_seconds"
@@ -45,11 +46,13 @@ const (
 	serviceKey          = "service"
 	serviceNamespaceKey = "service_namespace"
 
-	hostIDKey   = "host_id"
-	hostNameKey = "host_name"
+	hostIDKey        = "host_id"
+	hostNameKey      = "host_name"
+	grafanaHostIDKey = "grafana_host_id"
 
 	k8sNamespaceName   = "k8s_namespace_name"
 	k8sPodName         = "k8s_pod_name"
+	k8sContainerName   = "k8s_container_name"
 	k8sDeploymentName  = "k8s_deployment_name"
 	k8sStatefulSetName = "k8s_statefulset_name"
 	k8sReplicaSetName  = "k8s_replicaset_name"
@@ -90,16 +93,12 @@ const (
 
 // not adding version, as it is a fixed value
 var beylaInfoLabelNames = []string{LanguageLabel}
+var hostInfoLabelNames = []string{grafanaHostIDKey}
 
 // TODO: TLS
 type PrometheusConfig struct {
 	Port int    `yaml:"port" env:"BEYLA_PROMETHEUS_PORT"`
 	Path string `yaml:"path" env:"BEYLA_PROMETHEUS_PATH"`
-
-	// Deprecated. Going to be removed in Beyla 2.0. Use attributes.select instead
-	ReportTarget bool `yaml:"report_target" env:"BEYLA_METRICS_REPORT_TARGET"`
-	// Deprecated. Going to be removed in Beyla 2.0. Use attributes.select instead
-	ReportPeerInfo bool `yaml:"report_peer" env:"BEYLA_METRICS_REPORT_PEER"`
 
 	DisableBuildInfo bool `yaml:"disable_build_info" env:"BEYLA_PROMETHEUS_DISABLE_BUILD_INFO"`
 
@@ -114,6 +113,8 @@ type PrometheusConfig struct {
 	// removed from the metrics set.
 	TTL                         time.Duration `yaml:"ttl" env:"BEYLA_PROMETHEUS_TTL"`
 	SpanMetricsServiceCacheSize int           `yaml:"service_cache_size"`
+
+	AllowServiceGraphSelfReferences bool `yaml:"allow_service_graph_self_references" env:"BEYLA_PROMETHEUS_ALLOW_SERVICE_GRAPH_SELF_REFERENCES"`
 
 	// Registry is only used for embedding Beyla within the Grafana Agent.
 	// It must be nil when Beyla runs as standalone
@@ -133,7 +134,19 @@ func (p *PrometheusConfig) ServiceGraphMetricsEnabled() bool {
 }
 
 func (p *PrometheusConfig) NetworkMetricsEnabled() bool {
+	return p.NetworkFlowBytesEnabled() || p.NetworkInterzoneMetricsEnabled()
+}
+
+func (p *PrometheusConfig) NetworkFlowBytesEnabled() bool {
 	return slices.Contains(p.Features, otel.FeatureNetwork)
+}
+
+func (p *PrometheusConfig) NetworkInterzoneMetricsEnabled() bool {
+	return slices.Contains(p.Features, otel.FeatureNetworkInterZone)
+}
+
+func (p *PrometheusConfig) EBPFEnabled() bool {
+	return slices.Contains(p.Features, otel.FeatureEBPF)
 }
 
 func (p *PrometheusConfig) EndpointEnabled() bool {
@@ -170,18 +183,25 @@ type metricsReporter struct {
 	attrMsgProcessDuration    []attributes.Field[*request.Span, string]
 	attrHTTPRequestSize       []attributes.Field[*request.Span, string]
 	attrHTTPClientRequestSize []attributes.Field[*request.Span, string]
+	attrGPUKernelCalls        []attributes.Field[*request.Span, string]
+	attrGPUMemoryAllocs       []attributes.Field[*request.Span, string]
 
 	// trace span metrics
 	spanMetricsLatency    *Expirer[prometheus.Histogram]
 	spanMetricsCallsTotal *Expirer[prometheus.Counter]
 	spanMetricsSizeTotal  *Expirer[prometheus.Counter]
 	tracesTargetInfo      *Expirer[prometheus.Gauge]
+	tracesHostInfo        *Expirer[prometheus.Gauge]
 
 	// trace service graph
 	serviceGraphClient *Expirer[prometheus.Histogram]
 	serviceGraphServer *Expirer[prometheus.Histogram]
 	serviceGraphFailed *Expirer[prometheus.Counter]
 	serviceGraphTotal  *Expirer[prometheus.Counter]
+
+	// gpu related metrics
+	gpuKernelCallsTotal  *Expirer[prometheus.Counter]
+	gpuMemoryAllocsTotal *Expirer[prometheus.Counter]
 
 	promConnect *connector.PrometheusManager
 
@@ -194,7 +214,7 @@ type metricsReporter struct {
 	kubeEnabled bool
 	hostID      string
 
-	serviceCache *expirable.LRU[svc.UID, svc.ID]
+	serviceCache *expirable.LRU[svc.UID, svc.Attrs]
 }
 
 func PrometheusEndpoint(
@@ -273,6 +293,15 @@ func newReporter(
 			attrsProvider.For(attributes.MessagingProcessDuration))
 	}
 
+	var attrGPUKernelLaunchCalls []attributes.Field[*request.Span, string]
+	var attrGPUMemoryAllocations []attributes.Field[*request.Span, string]
+	if is.GPUEnabled() {
+		attrGPUKernelLaunchCalls = attributes.PrometheusGetters(request.SpanPromGetters,
+			attrsProvider.For(attributes.GPUKernelLaunchCalls))
+		attrGPUMemoryAllocations = attributes.PrometheusGetters(request.SpanPromGetters,
+			attrsProvider.For(attributes.GPUMemoryAllocations))
+	}
+
 	clock := expire.NewCachedClock(timeNow)
 	kubeEnabled := ctxInfo.K8sInformer.IsKubeEnabled()
 	// If service name is not explicitly set, we take the service name as set by the
@@ -295,6 +324,8 @@ func newReporter(
 		attrMsgProcessDuration:    attrMessagingProcessDuration,
 		attrHTTPRequestSize:       attrHTTPRequestSize,
 		attrHTTPClientRequestSize: attrHTTPClientRequestSize,
+		attrGPUKernelCalls:        attrGPUKernelLaunchCalls,
+		attrGPUMemoryAllocs:       attrGPUMemoryAllocations,
 		beylaInfo: NewExpirer[prometheus.Gauge](prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: BeylaBuildInfo,
 			Help: "A metric with a constant '1' value labeled by version, revision, branch, " +
@@ -426,6 +457,12 @@ func newReporter(
 				Help: "target service information in trace span metric format",
 			}, labelNamesTargetInfo(kubeEnabled)).MetricVec, clock.Time, cfg.TTL)
 		}),
+		tracesHostInfo: optionalGaugeProvider(cfg.SpanMetricsEnabled() || cfg.ServiceGraphMetricsEnabled(), func() *Expirer[prometheus.Gauge] {
+			return NewExpirer[prometheus.Gauge](prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: TracesHostInfo,
+				Help: "A metric with a constant '1' value labeled by the host id ",
+			}, hostInfoLabelNames).MetricVec, clock.Time, cfg.TTL)
+		}),
 		serviceGraphClient: optionalHistogramProvider(cfg.ServiceGraphMetricsEnabled(), func() *Expirer[prometheus.Histogram] {
 			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
 				Name:                            ServiceGraphClient,
@@ -462,10 +499,22 @@ func newReporter(
 			Name: TargetInfo,
 			Help: "attributes associated to a given monitored entity",
 		}, labelNamesTargetInfo(kubeEnabled)).MetricVec, clock.Time, cfg.TTL),
+		gpuKernelCallsTotal: optionalCounterProvider(is.GPUEnabled(), func() *Expirer[prometheus.Counter] {
+			return NewExpirer[prometheus.Counter](prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: attributes.GPUKernelLaunchCalls.Prom,
+				Help: "number of GPU kernel launches",
+			}, labelNames(attrGPUKernelLaunchCalls)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		gpuMemoryAllocsTotal: optionalCounterProvider(is.GPUEnabled(), func() *Expirer[prometheus.Counter] {
+			return NewExpirer[prometheus.Counter](prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: attributes.GPUMemoryAllocations.Prom,
+				Help: "amount of GPU allocated memory in bytes",
+			}, labelNames(attrGPUMemoryAllocations)).MetricVec, clock.Time, cfg.TTL)
+		}),
 	}
 
 	if cfg.SpanMetricsEnabled() {
-		mr.serviceCache = expirable.NewLRU(cfg.SpanMetricsServiceCacheSize, func(_ svc.UID, v svc.ID) {
+		mr.serviceCache = expirable.NewLRU(cfg.SpanMetricsServiceCacheSize, func(_ svc.UID, v svc.Attrs) {
 			lv := mr.labelValuesTargetInfo(v)
 			mr.tracesTargetInfo.WithLabelValues(lv...).metric.Sub(1)
 		}, cfg.TTL)
@@ -526,6 +575,17 @@ func newReporter(
 		)
 	}
 
+	if cfg.SpanMetricsEnabled() || cfg.ServiceGraphMetricsEnabled() {
+		registeredMetrics = append(registeredMetrics, mr.tracesHostInfo)
+	}
+
+	if is.GPUEnabled() {
+		registeredMetrics = append(registeredMetrics,
+			mr.gpuKernelCallsTotal,
+			mr.gpuMemoryAllocsTotal,
+		)
+	}
+
 	if mr.cfg.Registry != nil {
 		mr.cfg.Registry.MustRegister(registeredMetrics...)
 	} else {
@@ -575,16 +635,30 @@ func (r *metricsReporter) collectMetrics(input <-chan []request.Span) {
 	}
 }
 
+func (r *metricsReporter) otelSpanObserved(span *request.Span) bool {
+	return r.cfg.OTelMetricsEnabled() && !span.Service.ExportsOTelMetrics()
+}
+
+func (r *metricsReporter) otelSpanFiltered(span *request.Span) bool {
+	return span.InternalSignal() || span.IgnoreMetrics()
+}
+
 // nolint:cyclop
 func (r *metricsReporter) observe(span *request.Span) {
+	if r.otelSpanFiltered(span) {
+		return
+	}
 	t := span.Timings()
-	r.beylaInfo.WithLabelValues(span.ServiceID.SDKLanguage.String()).metric.Set(1.0)
+	r.beylaInfo.WithLabelValues(span.Service.SDKLanguage.String()).metric.Set(1.0)
+	if r.cfg.SpanMetricsEnabled() || r.cfg.ServiceGraphMetricsEnabled() {
+		r.tracesHostInfo.WithLabelValues(r.hostID).metric.Set(1.0)
+	}
 	duration := t.End.Sub(t.RequestStart).Seconds()
 
-	targetInfoLabelValues := r.labelValuesTargetInfo(span.ServiceID)
+	targetInfoLabelValues := r.labelValuesTargetInfo(span.Service)
 	r.targetInfo.WithLabelValues(targetInfoLabelValues...).metric.Set(1)
 
-	if r.cfg.OTelMetricsEnabled() {
+	if r.otelSpanObserved(span) {
 		switch span.Type {
 		case request.EventTypeHTTP:
 			if r.is.HTTPEnabled() {
@@ -635,46 +709,62 @@ func (r *metricsReporter) observe(span *request.Span) {
 					).metric.Observe(duration)
 				}
 			}
+		case request.EventTypeGPUKernelLaunch:
+			if r.is.GPUEnabled() {
+				r.gpuKernelCallsTotal.WithLabelValues(
+					labelValues(span, r.attrGPUKernelCalls)...,
+				).metric.Add(1)
+			}
+		case request.EventTypeGPUMalloc:
+			if r.is.GPUEnabled() {
+				r.gpuMemoryAllocsTotal.WithLabelValues(
+					labelValues(span, r.attrGPUMemoryAllocs)...,
+				).metric.Add(float64(span.ContentLength))
+			}
 		}
 	}
+
 	if r.cfg.SpanMetricsEnabled() {
 		lv := r.labelValuesSpans(span)
 		r.spanMetricsLatency.WithLabelValues(lv...).metric.Observe(duration)
 		r.spanMetricsCallsTotal.WithLabelValues(lv...).metric.Add(1)
 		r.spanMetricsSizeTotal.WithLabelValues(lv...).metric.Add(float64(span.RequestLength()))
 
-		_, ok := r.serviceCache.Get(span.ServiceID.UID)
+		_, ok := r.serviceCache.Get(span.Service.UID)
 		if !ok {
-			r.serviceCache.Add(span.ServiceID.UID, span.ServiceID)
+			r.serviceCache.Add(span.Service.UID, span.Service)
 			r.tracesTargetInfo.WithLabelValues(targetInfoLabelValues...).metric.Add(1)
 		}
 	}
 
 	if r.cfg.ServiceGraphMetricsEnabled() {
-		lvg := r.labelValuesServiceGraph(span)
-		if span.IsClientSpan() {
-			r.serviceGraphClient.WithLabelValues(lvg...).metric.Observe(duration)
-		} else {
-			r.serviceGraphServer.WithLabelValues(lvg...).metric.Observe(duration)
-		}
-		r.serviceGraphTotal.WithLabelValues(lvg...).metric.Add(1)
-		if request.SpanStatusCode(span) == codes.Error {
-			r.serviceGraphFailed.WithLabelValues(lvg...).metric.Add(1)
+		if !span.IsSelfReferenceSpan() || r.cfg.AllowServiceGraphSelfReferences {
+			lvg := r.labelValuesServiceGraph(span)
+			if span.IsClientSpan() {
+				r.serviceGraphClient.WithLabelValues(lvg...).metric.Observe(duration)
+			} else {
+				r.serviceGraphServer.WithLabelValues(lvg...).metric.Observe(duration)
+			}
+			r.serviceGraphTotal.WithLabelValues(lvg...).metric.Add(1)
+			if request.SpanStatusCode(span) == codes.Error {
+				r.serviceGraphFailed.WithLabelValues(lvg...).metric.Add(1)
+			}
 		}
 	}
 }
 
 func appendK8sLabelNames(names []string) []string {
-	names = append(names, k8sNamespaceName, k8sPodName, k8sNodeName, k8sPodUID, k8sPodStartTime,
+	names = append(names, k8sNamespaceName, k8sPodName, k8sContainerName, k8sNodeName, k8sPodUID, k8sPodStartTime,
 		k8sDeploymentName, k8sReplicaSetName, k8sStatefulSetName, k8sDaemonSetName, k8sClusterName)
 	return names
 }
 
-func appendK8sLabelValuesService(values []string, service svc.ID) []string {
+func appendK8sLabelValuesService(values []string, service svc.Attrs) []string {
 	// must follow the order in appendK8sLabelNames
 	values = append(values,
 		service.Metadata[(attr.K8sNamespaceName)],
 		service.Metadata[(attr.K8sPodName)],
+		service.Metadata[(attr.K8sContainerName)],
 		service.Metadata[(attr.K8sNodeName)],
 		service.Metadata[(attr.K8sPodUID)],
 		service.Metadata[(attr.K8sPodStartTime)],
@@ -692,18 +782,14 @@ func labelNamesSpans() []string {
 }
 
 func (r *metricsReporter) labelValuesSpans(span *request.Span) []string {
-	job := span.ServiceID.Name
-	if span.ServiceID.Namespace != "" {
-		job = span.ServiceID.Namespace + "/" + job
-	}
 	return []string{
-		span.ServiceID.Name,
-		span.ServiceID.Namespace,
+		span.Service.UID.Name,
+		span.Service.UID.Namespace,
 		span.TraceName(),
 		strconv.Itoa(int(request.SpanStatusCode(span))),
 		span.ServiceGraphKind(),
-		span.ServiceID.Instance,
-		job,
+		span.Service.UID.Instance, // app instance ID
+		span.Service.Job(),
 		"beyla",
 	}
 }
@@ -718,18 +804,14 @@ func labelNamesTargetInfo(kubeEnabled bool) []string {
 	return names
 }
 
-func (r *metricsReporter) labelValuesTargetInfo(service svc.ID) []string {
-	job := service.Name
-	if service.Namespace != "" {
-		job = service.Namespace + "/" + job
-	}
+func (r *metricsReporter) labelValuesTargetInfo(service svc.Attrs) []string {
 	values := []string{
 		r.hostID,
 		service.HostName,
-		service.Name,
-		service.Namespace,
-		service.Instance,
-		job,
+		service.UID.Name,
+		service.UID.Namespace,
+		service.UID.Instance, // app instance ID
+		service.Job(),
 		service.SDKLanguage.String(),
 		"beyla",
 		"beyla",
@@ -750,7 +832,7 @@ func (r *metricsReporter) labelValuesServiceGraph(span *request.Span) []string {
 	if span.IsClientSpan() {
 		return []string{
 			request.SpanPeer(span),
-			span.ServiceID.Namespace,
+			span.Service.UID.Namespace,
 			request.SpanHost(span),
 			span.OtherNamespace,
 			"beyla",
@@ -760,7 +842,7 @@ func (r *metricsReporter) labelValuesServiceGraph(span *request.Span) []string {
 		request.SpanPeer(span),
 		span.OtherNamespace,
 		request.SpanHost(span),
-		span.ServiceID.Namespace,
+		span.Service.UID.Namespace,
 		"beyla",
 	}
 }

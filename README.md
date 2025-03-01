@@ -4,7 +4,7 @@
 
 Open source zero-code automatic instrumentation with eBPF and OpenTelemetry.
 
-[![Build Status](https://drone.grafana.net/api/badges/grafana/beyla/status.svg?ref=refs/heads/main)](https://drone.grafana.net/grafana/beyla)
+![status badge](https://github.com/grafana/beyla/actions/workflows/publish_dockerhub_release.yml/badge.svg)
 
 ## Introduction
 
@@ -63,14 +63,14 @@ See [Documentation](https://grafana.com/docs/beyla/) and the [tutorials](https:/
 ## Requirements
 
 - Linux with Kernel 5.8 or higher with [BTF](https://www.kernel.org/doc/html/latest/bpf/btf.html)
-  enabled. BTF became enabled by default on most Linux distributions with kernel 5.14 or higher. 
+  enabled, or Linux distributions running RedHat Enterprise Linux 4.18 kernels build 348 and above as they have the required kernel backports. These include CentOS, AlmaLinux, and Oracle Linux. BTF became enabled by default on most Linux distributions with kernel 5.14 or higher.
   You can check if your kernel has BTF enabled by verifying if `/sys/kernel/btf/vmlinux` exists on your system.
   If you need to recompile your kernel to enable BTF, the configuration option `CONFIG_DEBUG_INFO_BTF=y` must be
-  set. 
-- eBPF enabled on the host
+  set.
+- eBPF enabled on the host.
 - For instrumenting Go programs, they must have been compiled with at least Go 1.17. We currently
   support Go applications built with a major **Go version no earlier than 3 versions** behind the current
-  stable major release.  
+  stable major release.
 - Some level of elevated permissions to execute the instrumenter:
     - On host systems, running Beyla requires `sudo`.
     - For Kubernetes we have detailed configuration example on how to run with minimum
@@ -127,28 +127,79 @@ You can just trigger the Kubernetes descriptors in the `deployments/` folder.
 
 You should be able to query traces and metrics in your Grafana board.
 
-## Development recipes
+## Building Beyla from scratch
 
-### How to regenerate the eBPF Kernel binaries
+### Development environment requirements
 
-The eBPF program is embedded into the `pkg/internal/ebpf/bpf_*` generated files.
-This step is generally not needed unless you change the C code in the `bpf` folder.
-
-If you have Docker installed, you just need to run:
-
+#### Minimum requirements
+- go 1.23
+- docker
+- GNU make
+#### Optional requirements
+- llvm >= 19
+- clang >= 19
+### Quickstart
 ```
-make docker-generate
-```
-
-If you can't install docker, you should locally install the following required packages:
-
-```
-dnf install -y kernel-devel make llvm clang glibc-devel.i686
-make generate
+$ git clone https://github.com/grafana/beyla.git
+$ cd beyla/
+$ make dev
 ```
 
-Tested in Fedora 35, 38 and Red Hat Enterprise Linux 8.
+#### Common `Makefile` targets
+
+Beyla's `Makefile` provides several specific-purpose build targets. The most common ones are:
+- `prereqs` - install the build pre-requisites
+- `docker-generate` - regenerates the eBPF binaries (_preferred method_)
+- `generate` - regenerates the eBPF binaries [^1]
+- `compile` - compiles the `beyla` binary (but does not automatically regenerates the eBPF binaries)
+- `dev` - equivalent to `make prereqs && make docker-generate && make compile`
+- `test` - runs unit tests
+- `integration-tests` - runs integration tests - may require `sudo`
+- `clang-format` - formats C (eBPF) source code[^1]
+
+[^1]: Requires llvm/clang
+####  Quickstart
+
+```
+$ git clone https://github.com/grafana/beyla.git
+$ cd beyla/
+$ make dev
+```
+
+As described in the previous section, `make dev` takes care of setting up the build pre-requisites, including deploying a `clang-format` pre-commit hook.
+
+After a successful compilation, binaries can be found in the `bin/` subdirectory.
+
+#### Formatting and linting code
+
+Beyla uses linters to enforce our coding style and best practices:
+- `golangci-lint` for Go code
+- `clang-format` for formatting C code
+- `clang-tidy` for static analysis of the C code
+
+All of them are enforced on pull requests as part of the Beyla github workflows. Additionally, you can invoke the linters manually:
+
+- `make lint` invokes `golangci-lint` on the Go code
+- `make clang-tidy` invokes `clang-tidy` on the C/eBPF code
+
+`clang-format` is invoked automatically as a `pre-commit` git hook, you can run it directly by using the `Makefile` `clang-format` target.
+
+#### Running VM tests
+
+In addition to the `test` and `integration-test` `Makefile` targets, Beyla also runs select tests on QEMU virtual machines in order to be able to test different kernel versions. These tests are also part of our GitHub workflow, but it is also possible to run them manually using the following command:
+
+```
+$ sudo make -C test/vm KERNEL_VER=...
+```
+
+where `KERNEL_VER` is one of the supported kernel versions located in `test/vm/kernels`. For example, to run tests against kernel version 5.15.152, simply do:
+
+```
+$ sudo make -C test/vm KERNEL_VER=5.15.152
+```
 
 ## Credits
 
 Part of the code is taken from: https://github.com/open-telemetry/opentelemetry-go-instrumentation
+
+

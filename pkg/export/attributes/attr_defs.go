@@ -3,7 +3,7 @@ package attributes
 import (
 	"maps"
 
-	attr "github.com/grafana/beyla/pkg/export/attributes/names"
+	attr "github.com/grafana/beyla/v2/pkg/export/attributes/names"
 )
 
 // AttrGroups will let enabling by default some groups of attributes under
@@ -17,8 +17,6 @@ const (
 	GroupHTTPRoutes
 	GroupNetIfaceDirection
 	GroupNetCIDR
-	GroupPeerInfo // TODO Beyla 2.0: remove when we remove ReportPeerInfo configuration option
-	GroupTarget   // TODO Beyla 2.0: remove when we remove ReportTarget configuration option
 	GroupTraces
 )
 
@@ -36,14 +34,14 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 	kubeEnabled := groups.Has(GroupKubernetes)
 	promEnabled := groups.Has(GroupPrometheus)
 	ifaceDirEnabled := groups.Has(GroupNetIfaceDirection)
-	peerInfoEnabled := groups.Has(GroupPeerInfo)
 	cidrEnabled := groups.Has(GroupNetCIDR)
 
 	// attributes to be reported exclusively for prometheus exporters
 	var prometheusAttributes = AttrReportGroup{
 		Disabled: !promEnabled,
 		Attributes: map[attr.Name]Default{
-			attr.TargetInstance:   true,
+			attr.Instance:         true,
+			attr.Job:              true,
 			attr.ServiceNamespace: true,
 		},
 	}
@@ -58,24 +56,45 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 		},
 	}
 
+	// network metrics attributes
+	networkAttributes := AttrReportGroup{
+		Attributes: map[attr.Name]Default{
+			attr.Direction:      true,
+			attr.BeylaIP:        false,
+			attr.Transport:      false,
+			attr.SrcAddress:     false,
+			attr.DstAddres:      false,
+			attr.SrcPort:        false,
+			attr.DstPort:        false,
+			attr.SrcName:        false,
+			attr.DstName:        false,
+			attr.ServerPort:     false,
+			attr.ClientPort:     false,
+			attr.SrcZone:        false,
+			attr.DstZone:        false,
+			attr.IfaceDirection: Default(ifaceDirEnabled),
+			attr.Iface:          Default(ifaceDirEnabled),
+		},
+	}
+
 	// attributes to be reported exclusively for network metrics when
 	// kubernetes metadata is enabled
 	var networkKubeAttributes = AttrReportGroup{
 		Disabled: !kubeEnabled,
 		Attributes: map[attr.Name]Default{
 			attr.K8sSrcOwnerName: true,
+			attr.K8sSrcOwnerType: true,
 			attr.K8sSrcNamespace: true,
 			attr.K8sDstOwnerName: true,
+			attr.K8sDstOwnerType: true,
 			attr.K8sDstNamespace: true,
 			attr.K8sClusterName:  true,
 			attr.K8sSrcName:      false,
 			attr.K8sSrcType:      false,
-			attr.K8sSrcOwnerType: false,
 			attr.K8sSrcNodeIP:    false,
 			attr.K8sSrcNodeName:  false,
 			attr.K8sDstName:      false,
 			attr.K8sDstType:      false,
-			attr.K8sDstOwnerType: false,
 			attr.K8sDstNodeIP:    false,
 			attr.K8sDstNodeName:  false,
 		},
@@ -91,6 +110,16 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 		},
 	}
 
+	// networkInterZone* supports the same attributes as
+	// network* counterpart, but all of them disabled by default, to keep cardinality low
+	networkInterZone := copyDisabled(networkAttributes)
+	networkInterZone.Attributes[attr.K8sClusterName] = true
+	networkInterZoneKube := copyDisabled(networkKubeAttributes)
+	networkInterZoneCIDR := copyDisabled(networkCIDR)
+	// only src and dst zone are enabled by default
+	networkInterZone.Attributes[attr.SrcZone] = true
+	networkInterZone.Attributes[attr.DstZone] = true
+
 	// attributes to be reported exclusively for application metrics when
 	// kubernetes metadata is enabled
 	var appKubeAttributes = AttrReportGroup{
@@ -98,6 +127,7 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 		Attributes: map[attr.Name]Default{
 			attr.K8sNamespaceName:   true,
 			attr.K8sPodName:         true,
+			attr.K8sContainerName:   true,
 			attr.K8sDeploymentName:  true,
 			attr.K8sReplicaSetName:  true,
 			attr.K8sDaemonSetName:   true,
@@ -106,6 +136,7 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 			attr.K8sPodUID:          true,
 			attr.K8sPodStartTime:    true,
 			attr.K8sClusterName:     true,
+			attr.K8sOwnerName:       true,
 		},
 	}
 
@@ -118,7 +149,7 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 
 	var serverInfo = AttrReportGroup{
 		Attributes: map[attr.Name]Default{
-			attr.ClientAddr: Default(peerInfoEnabled),
+			attr.ClientAddr: false,
 			attr.ServerAddr: true,
 			attr.ServerPort: true,
 		},
@@ -135,18 +166,8 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 		},
 	}
 
-	// TODO Beyla 2.0 remove
-	// this just defaults the path as default when the target report is enabled
-	// via the deprecated BEYLA_METRICS_REPORT_TARGET config option
-	var deprecatedHTTPPath = AttrReportGroup{
-		Disabled: !groups.Has(GroupTarget),
-		Attributes: map[attr.Name]Default{
-			attr.HTTPUrlPath: true,
-		},
-	}
-
 	var httpCommon = AttrReportGroup{
-		SubGroups: []*AttrReportGroup{&httpRoutes, &deprecatedHTTPPath},
+		SubGroups: []*AttrReportGroup{&httpRoutes},
 		Attributes: map[attr.Name]Default{
 			attr.HTTPRequestMethod:      true,
 			attr.HTTPResponseStatusCode: true,
@@ -166,6 +187,8 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 	var promProcessAttributes = AttrReportGroup{
 		Disabled: !promEnabled,
 		Attributes: map[attr.Name]Default{
+			attr.Instance:        true,
+			attr.Job:             true,
 			attr.ProcCommand:     true,
 			attr.ProcOwner:       true,
 			attr.ProcParentPid:   true,
@@ -180,7 +203,7 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 	var processAttributes = AttrReportGroup{
 		SubGroups: []*AttrReportGroup{&appKubeAttributes, &hostAttributes, &promProcessAttributes},
 		Attributes: map[attr.Name]Default{
-			attr.ProcCPUState:  true,
+			attr.ProcCPUMode:   true,
 			attr.ProcDiskIODir: true,
 			attr.ProcNetIODir:  true,
 		},
@@ -196,22 +219,10 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 
 	return map[Section]AttrReportGroup{
 		BeylaNetworkFlow.Section: {
-			SubGroups: []*AttrReportGroup{&networkCIDR, &networkKubeAttributes},
-			Attributes: map[attr.Name]Default{
-				attr.Direction:      true,
-				attr.BeylaIP:        false,
-				attr.Transport:      false,
-				attr.SrcAddress:     false,
-				attr.DstAddres:      false,
-				attr.SrcPort:        false,
-				attr.DstPort:        false,
-				attr.SrcName:        false,
-				attr.DstName:        false,
-				attr.ServerPort:     false,
-				attr.ClientPort:     false,
-				attr.IfaceDirection: Default(ifaceDirEnabled),
-				attr.Iface:          Default(ifaceDirEnabled),
-			},
+			SubGroups: []*AttrReportGroup{&networkAttributes, &networkCIDR, &networkKubeAttributes},
+		},
+		BeylaNetworkInterZone.Section: {
+			SubGroups: []*AttrReportGroup{&networkInterZone, &networkInterZoneCIDR, &networkInterZoneKube},
 		},
 		HTTPServerDuration.Section: {
 			SubGroups: []*AttrReportGroup{&appAttributes, &appKubeAttributes, &httpCommon, &serverInfo},
@@ -244,9 +255,9 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 		DBClientDuration.Section: {
 			SubGroups: []*AttrReportGroup{&appAttributes, &appKubeAttributes},
 			Attributes: map[attr.Name]Default{
-				attr.DBOperation: true,
-				attr.DBSystem:    true,
-				attr.ErrorType:   true,
+				attr.DBOperation:  true,
+				attr.DBSystemName: true,
+				attr.ErrorType:    true,
 			},
 		},
 		MessagingPublishDuration.Section: {
@@ -266,7 +277,47 @@ func getDefinitions(groups AttrGroups) map[Section]AttrReportGroup {
 		ProcessMemoryVirtual.Section:  {SubGroups: []*AttrReportGroup{&processAttributes}},
 		ProcessDiskIO.Section:         {SubGroups: []*AttrReportGroup{&processAttributes}},
 		ProcessNetIO.Section:          {SubGroups: []*AttrReportGroup{&processAttributes}},
+		GPUKernelLaunchCalls.Section: {
+			SubGroups: []*AttrReportGroup{&appAttributes, &appKubeAttributes},
+			Attributes: map[attr.Name]Default{
+				attr.CudaKernelName: true,
+			},
+		},
+		GPUMemoryAllocations.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes, &appKubeAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
+		// span and service graph metrics don't yet implement attribute selection,
+		// but their values can still be filtered, so we list them here just to
+		// make the filter recognize its attributes
+		// TODO: when service graph and spam metrics implement attribute selection, replace this section by proper metric names
+		"---- temporary placeholder for span and service graph metrics ----": {
+			Attributes: map[attr.Name]Default{
+				attr.Client:            false,
+				attr.ClientNamespace:   false,
+				attr.Server:            false,
+				attr.ServerNamespace:   false,
+				attr.Source:            false,
+				attr.Service:           false,
+				attr.ServiceInstanceID: false,
+				attr.ServiceNamespace:  false,
+				attr.SpanKind:          false,
+				attr.SpanName:          false,
+				attr.StatusCode:        false,
+			},
+		},
 	}
+}
+
+func copyDisabled(src AttrReportGroup) AttrReportGroup {
+	var dst = AttrReportGroup{
+		Disabled:   src.Disabled,
+		Attributes: map[attr.Name]Default{},
+	}
+	for k := range src.Attributes {
+		dst.Attributes[k] = false
+	}
+	return dst
 }
 
 // AllAttributeNames returns a set with all the names in the attributes database

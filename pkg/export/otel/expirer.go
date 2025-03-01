@@ -8,8 +8,9 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/grafana/beyla/pkg/export/attributes"
-	"github.com/grafana/beyla/pkg/export/expire"
+	"github.com/grafana/beyla/v2/pkg/export/attributes"
+	"github.com/grafana/beyla/v2/pkg/export/expire"
+	"github.com/grafana/beyla/v2/pkg/export/otel/metric/api/metric"
 )
 
 var timeNow = time.Now
@@ -19,9 +20,7 @@ func plog() *slog.Logger {
 }
 
 type removableMetric[VT any] interface {
-	// [TODO otel-removal] uncomment when this is fixed https://github.com/grafana/beyla/issues/1065
-	// or when this is released into main OTEL https://github.com/open-telemetry/opentelemetry-specification/pull/4135
-	// Remove(context.Context, ...metric.RemoveOption)
+	Remove(context.Context, ...metric.RemoveOption)
 }
 
 // Expirer drops metrics from labels that haven't been updated during a given timeout.
@@ -72,15 +71,13 @@ func NewExpirer[Record any, Metric removableMetric[ValType], ValType any](
 // ForRecord returns the data point for the given eBPF record. If that record
 // is accessed for the first time, a new data point is created.
 // If not, a cached copy is returned and the "last access" cache time is updated.
-// Extra attributes can be explicitly added (e.g. process_cpu_state="wait")
+// Extra attributes can be explicitly added (e.g. cpu_mode="wait")
 func (ex *Expirer[Record, Metric, ValType]) ForRecord(r Record, extraAttrs ...attribute.KeyValue) (Metric, attribute.Set) {
 	// to save resources, metrics expiration is triggered each TTL. This means that an expired
 	// metric might stay visible after 2*TTL time after not being updated
 	now := ex.clock()
 	if now.Sub(ex.lastExpiration) >= ex.ttl {
-		// [TODO otel-removal] uncomment when this is fixed https://github.com/grafana/beyla/issues/1065
-		// or when this is released into main OTEL https://github.com/open-telemetry/opentelemetry-specification/pull/4135
-		// ex.removeOutdated(ex.ctx)
+		ex.removeOutdated(ex.ctx)
 		ex.lastExpiration = now
 	}
 	recordAttrs, attrValues := ex.recordAttributes(r, extraAttrs...)
@@ -107,36 +104,32 @@ func (ex *Expirer[Record, Metric, ValType]) recordAttributes(m Record, extraAttr
 	return attribute.NewSet(keyVals...), vals
 }
 
-// [TODO otel-removal] uncomment when this is fixed https://github.com/grafana/beyla/issues/1065
-// or when this is released into main OTEL https://github.com/open-telemetry/opentelemetry-specification/pull/4135
-// func (ex *Expirer[Record, Metric, ValType]) removeOutdated(ctx context.Context) {
-//	for _, attrs := range ex.entries.DeleteExpired() {
-//		ex.deleteMetricInstance(ctx, attrs)
-//	}
-// }
-//
-// func (ex *Expirer[Record, Metric, ValType]) deleteMetricInstance(ctx context.Context, attrs attribute.Set) {
-//	if ex.log.Enabled(ex.ctx, slog.LevelDebug) {
-//		ex.logger(attrs).Debug("deleting old OTEL metric")
-//	}
-//	ex.metric.Remove(ctx, metric.WithAttributeSet(attrs))
-// }
-//
-// func (ex *Expirer[Record, Metric, ValType]) logger(attrs attribute.Set) *slog.Logger {
-//	fmtAttrs := make([]any, 0, attrs.Len()*2)
-//	for it := attrs.Iter(); it.Next(); {
-//		a := it.Attribute()
-//		fmtAttrs = append(fmtAttrs, string(a.Key), a.Value.Emit())
-//	}
-//	return ex.log.With(fmtAttrs...)
-// }
+func (ex *Expirer[Record, Metric, ValType]) removeOutdated(ctx context.Context) {
+	for _, attrs := range ex.entries.DeleteExpired() {
+		ex.deleteMetricInstance(ctx, attrs)
+	}
+}
+
+func (ex *Expirer[Record, Metric, ValType]) deleteMetricInstance(ctx context.Context, attrs attribute.Set) {
+	if ex.log.Enabled(ex.ctx, slog.LevelDebug) {
+		ex.logger(attrs).Debug("deleting old OTEL metric")
+	}
+	ex.metric.Remove(ctx, metric.WithAttributeSet(attrs))
+}
+
+func (ex *Expirer[Record, Metric, ValType]) logger(attrs attribute.Set) *slog.Logger {
+	fmtAttrs := make([]any, 0, attrs.Len()*2)
+	for it := attrs.Iter(); it.Next(); {
+		a := it.Attribute()
+		fmtAttrs = append(fmtAttrs, string(a.Key), a.Value.Emit())
+	}
+	return ex.log.With(fmtAttrs...)
+}
 
 // RemoveAllMetrics is explicitly invoked when the metrics reporter of a given service
 // instance needs to be shut down
-func (ex *Expirer[Record, Metric, ValType]) RemoveAllMetrics(_ context.Context) {
-	// [TODO otel-removal] uncomment when this is fixed https://github.com/grafana/beyla/issues/1065
-	// or when this is released into main OTEL https://github.com/open-telemetry/opentelemetry-specification/pull/4135
-	// for _, attrs := range ex.entries.DeleteAll() {
-	//	ex.deleteMetricInstance(ctx, attrs)
-	// }
+func (ex *Expirer[Record, Metric, ValType]) RemoveAllMetrics(ctx context.Context) {
+	for _, attrs := range ex.entries.DeleteAll() {
+		ex.deleteMetricInstance(ctx, attrs)
+	}
 }

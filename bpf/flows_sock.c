@@ -1,3 +1,4 @@
+//go:build beyla_bpf_ignore
 // Copyright Red Hat / IBM
 // Copyright Grafana Labs
 //
@@ -23,24 +24,25 @@
 #include "bpf_endian.h"
 #include "bpf_dbg.h"
 #include "flows_common.h"
-#include "http_defs.h"
+#include "protocol_defs.h"
 
 struct __tcphdr {
     __be16 source;
     __be16 dest;
     __be32 seq;
     __be32 ack_seq;
-    __u16 res1 : 4, doff : 4, fin : 1, syn : 1, rst : 1, psh : 1, ack : 1, urg : 1, ece : 1, cwr : 1;
+    __u16 res1 : 4, doff : 4, fin : 1, syn : 1, rst : 1, psh : 1, ack : 1, urg : 1, ece : 1,
+        cwr : 1;
     __be16 window;
     __sum16 check;
     __be16 urg_ptr;
 };
 
 struct __udphdr {
-	__be16 source;
-	__be16 dest;
-	__be16 len;
-	__sum16 check;
+    __be16 source;
+    __be16 dest;
+    __be16 len;
+    __sum16 check;
 };
 
 static __always_inline bool read_sk_buff(struct __sk_buff *skb, flow_id *id, u16 *custom_flags) {
@@ -85,10 +87,17 @@ static __always_inline bool read_sk_buff(struct __sk_buff *skb, flow_id *id, u16
         break;
     }
     case ETH_P_IPV6:
-        bpf_skb_load_bytes(skb, ETH_HLEN + offsetof(struct ipv6hdr, nexthdr), &proto, sizeof(proto));
+        bpf_skb_load_bytes(
+            skb, ETH_HLEN + offsetof(struct ipv6hdr, nexthdr), &proto, sizeof(proto));
 
-        bpf_skb_load_bytes(skb, ETH_HLEN + offsetof(struct ipv6hdr, saddr), &id->src_ip.s6_addr, sizeof(id->src_ip.s6_addr));
-        bpf_skb_load_bytes(skb, ETH_HLEN + offsetof(struct ipv6hdr, daddr), &id->dst_ip.s6_addr, sizeof(id->dst_ip.s6_addr));
+        bpf_skb_load_bytes(skb,
+                           ETH_HLEN + offsetof(struct ipv6hdr, saddr),
+                           &id->src_ip.s6_addr,
+                           sizeof(id->src_ip.s6_addr));
+        bpf_skb_load_bytes(skb,
+                           ETH_HLEN + offsetof(struct ipv6hdr, daddr),
+                           &id->dst_ip.s6_addr,
+                           sizeof(id->dst_ip.s6_addr));
 
         hdr_len = ETH_HLEN + sizeof(struct ipv6hdr);
         break;
@@ -100,40 +109,52 @@ static __always_inline bool read_sk_buff(struct __sk_buff *skb, flow_id *id, u16
     id->dst_port = 0;
     id->transport_protocol = proto;
 
-    switch(proto) {
-        case IPPROTO_TCP: {
-            u16 port;
-            bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __tcphdr, source), &port, sizeof(port));
-            id->src_port = __bpf_htons(port);
+    switch (proto) {
+    case IPPROTO_TCP: {
+        u16 port;
+        bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __tcphdr, source), &port, sizeof(port));
+        id->src_port = __bpf_htons(port);
 
-            bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __tcphdr, dest), &port, sizeof(port));
-            id->dst_port = __bpf_htons(port);
+        bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __tcphdr, dest), &port, sizeof(port));
+        id->dst_port = __bpf_htons(port);
 
-            u8 doff;
-            bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __tcphdr, ack_seq) + 4, &doff, sizeof(doff)); // read the first byte past __tcphdr->ack_seq, we can't do offsetof bit fields
-            doff &= 0xf0; // clean-up res1
-            doff >>= 4; // move the upper 4 bits to low
-            doff *= 4; // convert to bytes length
+        u8 doff;
+        bpf_skb_load_bytes(
+            skb,
+            hdr_len + offsetof(struct __tcphdr, ack_seq) + 4,
+            &doff,
+            sizeof(
+                doff)); // read the first byte past __tcphdr->ack_seq, we can't do offsetof bit fields
+        doff &= 0xf0;   // clean-up res1
+        doff >>= 4;     // move the upper 4 bits to low
+        doff *= 4;      // convert to bytes length
 
-            u8 flags;
-            bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __tcphdr, ack_seq) + 4 + 1, &flags, sizeof(flags)); // read the second byte past __tcphdr->doff, again bit fields offsets
-            *custom_flags = ((u16)flags & 0x00ff);
+        u8 flags;
+        bpf_skb_load_bytes(
+            skb,
+            hdr_len + offsetof(struct __tcphdr, ack_seq) + 4 + 1,
+            &flags,
+            sizeof(flags)); // read the second byte past __tcphdr->doff, again bit fields offsets
+        *custom_flags = ((u16)flags & 0x00ff);
 
-            hdr_len += doff;
+        hdr_len += doff;
 
-            if ((skb->len - hdr_len) < 0) { // less than 0 is a packet we can't parse
-                return false;
-            }
-
-            break;
+        if ((skb->len - hdr_len) < 0) { // less than 0 is a packet we can't parse
+            return false;
         }
-        case IPPROTO_UDP: {
-            u16 port;
-            bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __udphdr, source), &port, sizeof(port));
-            id->src_port = __bpf_htons(port);
-            bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __udphdr, dest), &port, sizeof(port));
-            id->dst_port = __bpf_htons(port);
-        }
+
+        break;
+    }
+    case IPPROTO_UDP: {
+        u16 port;
+        bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __udphdr, source), &port, sizeof(port));
+        id->src_port = __bpf_htons(port);
+        bpf_skb_load_bytes(skb, hdr_len + offsetof(struct __udphdr, dest), &port, sizeof(port));
+        id->dst_port = __bpf_htons(port);
+        break;
+    }
+    default:
+        return false;
     }
 
     // custom flags
@@ -148,9 +169,9 @@ static __always_inline bool read_sk_buff(struct __sk_buff *skb, flow_id *id, u16
     return true;
 }
 
-static __always_inline bool same_ip(u8 *ip1, u8 *ip2) {
-    for (int i=0; i<16; i+=4) {
-        if (*((u32 *)(ip1+i)) != *((u32 *)(ip2+i))) {
+static __always_inline bool same_ip(const u8 *ip1, const u8 *ip2) {
+    for (int i = 0; i < 16; i += 4) {
+        if (*((u32 *)(ip1 + i)) != *((u32 *)(ip2 + i))) {
             return false;
         }
     }
@@ -159,22 +180,22 @@ static __always_inline bool same_ip(u8 *ip1, u8 *ip2) {
 }
 
 SEC("socket/http_filter")
-int socket__http_filter(struct __sk_buff *skb) {
+int beyla_socket__http_filter(struct __sk_buff *skb) {
     // If sampling is defined, will only parse 1 out of "sampling" flows
     if (sampling != 0 && (bpf_get_prandom_u32() % sampling) != 0) {
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     }
 
     u16 flags = 0;
     flow_id id;
     __builtin_memset(&id, 0, sizeof(id));
     if (!read_sk_buff(skb, &id, &flags)) {
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     }
 
     // ignore traffic that's not egress or ingress
     if (same_ip(id.src_ip.s6_addr, id.dst_ip.s6_addr)) {
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     }
 
     u64 current_time = bpf_ktime_get_ns();
@@ -214,21 +235,21 @@ int socket__http_filter(struct __sk_buff *skb) {
         };
 
         u8 *direction = (u8 *)bpf_map_lookup_elem(&flow_directions, &id);
-        if(direction == NULL) {
+        if (direction == NULL) {
             // Calculate direction based on first flag received
             // SYN and ACK mean someone else initiated the connection and this is the INGRESS direction
-            if((flags & (SYN_FLAG | ACK_FLAG)) == (SYN_FLAG | ACK_FLAG)) {
+            if ((flags & (SYN_FLAG | ACK_FLAG)) == (SYN_FLAG | ACK_FLAG)) {
                 new_flow.iface_direction = INGRESS;
             }
             // SYN only means we initiated the connection and this is the EGRESS direction
-            else if((flags & SYN_FLAG) == SYN_FLAG) {
+            else if ((flags & SYN_FLAG) == SYN_FLAG) {
                 new_flow.iface_direction = EGRESS;
             }
             // save, when direction was calculated based on TCP flag
-            if(new_flow.iface_direction != UNKNOWN) {
+            if (new_flow.iface_direction != UNKNOWN) {
                 // errors are intentionally omitted
                 bpf_map_update_elem(&flow_directions, &id, &new_flow.iface_direction, BPF_NOEXIST);
-            } 
+            }
             // fallback for lost or already started connections and UDP
             else {
                 new_flow.iface_direction = INGRESS;
@@ -257,7 +278,8 @@ int socket__http_filter(struct __sk_buff *skb) {
             }
 
             new_flow.errno = -ret;
-            flow_record *record = (flow_record *)bpf_ringbuf_reserve(&direct_flows, sizeof(flow_record), 0);
+            flow_record *record =
+                (flow_record *)bpf_ringbuf_reserve(&direct_flows, sizeof(flow_record), 0);
             if (!record) {
                 if (trace_messages) {
                     bpf_dbg_printk("couldn't reserve space in the ringbuf. Dropping flow");
@@ -272,10 +294,10 @@ int socket__http_filter(struct __sk_buff *skb) {
 
 cleanup:
     // finally, when flow receives FIN or RST, clean flow_directions
-    if(flags & FIN_FLAG || flags & RST_FLAG) {
+    if (flags & FIN_FLAG || flags & RST_FLAG) {
         bpf_map_delete_elem(&flow_directions, &id);
     }
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 // Force emitting structs into the ELF for automatic creation of Golang struct

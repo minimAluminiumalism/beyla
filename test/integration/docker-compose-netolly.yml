@@ -24,7 +24,7 @@ services:
       - ./configs/:/configs
       - ./system/sys/kernel/security:/sys/kernel/security
       - ../../testoutput:/coverage
-      - ../../testoutput/run:/var/run/beyla
+      - ../../testoutput/run-netolly:/var/run/beyla
     image: hatest-autoinstrumenter
     privileged: true
     network_mode: service:testserver
@@ -34,6 +34,9 @@ services:
       BEYLA_NETWORK_SOURCE: ${BEYLA_NETWORK_SOURCE}
       BEYLA_NETWORK_METRICS: "true" # explicitly enabling network metrics
       BEYLA_NETWORK_PRINT_FLOWS: "true"
+      BEYLA_METRICS_INTERVAL: "1s"
+      BEYLA_BPF_BATCH_TIMEOUT: "1s"
+      BEYLA_NETWORK_CACHE_ACTIVE_TIMEOUT: "1s"
       BEYLA_NETWORK_DEDUPER: ${BEYLA_NETWORK_DEDUPER}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otelcol:4318
       BEYLA_LOG_LEVEL: "DEBUG"
@@ -63,12 +66,10 @@ services:
 
   # Prometheus
   prometheus:
-    image: quay.io/prometheus/prometheus:v2.53.0
+    image: quay.io/prometheus/prometheus:v2.55.1
     container_name: prometheus
     command:
-      - --storage.tsdb.retention.time=1m
       - --config.file=/etc/prometheus/prometheus-config${PROM_CONFIG_SUFFIX}.yml
-      - --storage.tsdb.path=/prometheus
       - --web.enable-lifecycle
       - --web.route-prefix=/
     volumes:

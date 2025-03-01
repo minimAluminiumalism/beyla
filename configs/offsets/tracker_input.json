@@ -10,7 +10,9 @@
         "Header"
       ],
       "net/url.URL": [
-        "Path"
+        "Path",
+        "Host",
+        "Scheme"
       ],
       "net/http.Response": [
         "StatusCode"
@@ -46,6 +48,19 @@
       "net/http.conn": [
         "rwc",
         "tlsState"
+      ],
+      "net/http.http2ClientConn": [
+        "nextStreamID",
+        "tconn"
+      ],
+      "net/http.http2serverConn": [
+        "conn"
+      ],
+      "net/http.http2Framer": [
+        "w"
+      ],
+      "net/http.http2MetaHeadersFrame": [
+        "Fields"
       ]
     }
   },
@@ -65,6 +80,9 @@
       ],
       "golang.org/x/net/http2.serverConn": [
         "conn"
+      ],
+      "golang.org/x/net/http2.MetaHeadersFrame": [
+        "Fields"
       ]
     }
   },  
@@ -73,8 +91,7 @@
     "fields": {
       "google.golang.org/grpc/internal/transport.Stream": [
         "method",
-        "st",
-        "ctx"
+        "st"
       ],
       "google.golang.org/grpc/internal/status.Status": [
         "s"
@@ -90,6 +107,10 @@
       "google.golang.org/grpc/internal/transport.bufWriter": [
         "buf",
         "offset"
+      ],
+      "google.golang.org/grpc/internal/transport.ServerStream": [
+        "[1.69.0]Stream",
+        "[1.69.0]st"
       ]
     }
   },
