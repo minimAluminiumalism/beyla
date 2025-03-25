@@ -67,7 +67,23 @@ func (p *Tracer) Load() (*ebpf.CollectionSpec, error) {
 	return loadBpf()
 }
 
-func (p *Tracer) SetupTailCalls() {}
+func (p *Tracer) SetupTailCalls() {
+	for _, tc := range []struct {
+		index int
+		prog  *ebpf.Program
+	}{
+		{
+			index: 0,
+			prog:  p.bpfObjects.BeylaPacketExtenderWriteMsgTp,
+		},
+	} {
+		err := p.bpfObjects.ExtenderJumpTable.Update(uint32(tc.index), uint32(tc.prog.FD()), ebpf.UpdateAny)
+
+		if err != nil {
+			p.log.Error("error loading info tail call jump table", "error", err)
+		}
+	}
+}
 
 func (p *Tracer) Constants() map[string]any {
 	m := make(map[string]any, 2)
@@ -169,25 +185,32 @@ func (p *Tracer) startTC(ctx context.Context) {
 	p.tcManager.SetInterfaceManager(p.ifaceManager)
 	p.tcManager.AddProgram("tc/tc_egress", p.bpfObjects.BeylaAppEgress, tcmanager.AttachmentEgress)
 	p.tcManager.AddProgram("tc/tc_ingress", p.bpfObjects.BeylaAppIngress, tcmanager.AttachmentIngress)
+
 	p.ifaceManager.Start(ctx)
 }
 
 func (p *Tracer) Run(ctx context.Context, _ chan<- []request.Span) {
 	p.startTC(ctx)
 
-	<-ctx.Done()
+	errorCh := p.tcManager.Errors()
 
-	p.bpfObjects.Close()
+	select {
+	case <-ctx.Done():
+	case err := <-errorCh:
+		p.log.Error("TC manager returned an error, aborting", "error", err)
+	}
 
 	p.stopTC()
+	p.bpfObjects.Close()
 }
 
 func (p *Tracer) stopTC() {
 	p.log.Info("removing traffic control probes")
 
-	p.ifaceManager.Wait()
-	p.ifaceManager = nil
-
 	p.tcManager.Shutdown()
 	p.tcManager = nil
+
+	p.ifaceManager.Stop()
+	p.ifaceManager.Wait()
+	p.ifaceManager = nil
 }

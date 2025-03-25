@@ -133,7 +133,7 @@ bpf2go:
 prereqs: install-hooks bpf2go
 	@echo "### Check if prerequisites are met, and installing missing dependencies"
 	mkdir -p $(TEST_OUTPUT)/run
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,v1.61.0)
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,v1.64.7)
 	$(call go-install-tool,$(GO_OFFSETS_TRACKER),github.com/grafana/go-offsets-tracker/cmd/go-offsets-tracker,$(call gomod-version,grafana/go-offsets-tracker))
 	$(call go-install-tool,$(GOIMPORTS_REVISER),github.com/incu6us/goimports-reviser/v3,v3.6.4)
 	$(call go-install-tool,$(GO_LICENSES),github.com/google/go-licenses,v1.6.0)
@@ -341,22 +341,22 @@ oats-prereq: bin/ginkgo docker-generate
 .PHONY: oats-test-sql
 oats-test-sql: oats-prereq
 	mkdir -p test/oats/sql/$(TEST_OUTPUT)/run
-	cd test/oats/sql && TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
+	cd test/oats/sql && TESTCASE_TIMEOUT=5m TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
 
 .PHONY: oats-test-redis
 oats-test-redis: oats-prereq
 	mkdir -p test/oats/redis/$(TEST_OUTPUT)/run
-	cd test/oats/redis && TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
+	cd test/oats/redis && TESTCASE_TIMEOUT=5m TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
 
 .PHONY: oats-test-kafka
 oats-test-kafka: oats-prereq
 	mkdir -p test/oats/kafka/$(TEST_OUTPUT)/run
-	cd test/oats/kafka && TESTCASE_TIMEOUT=120s TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
+	cd test/oats/kafka && TESTCASE_TIMEOUT=5m TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
 
 .PHONY: oats-test-http
 oats-test-http: oats-prereq
 	mkdir -p test/oats/http/$(TEST_OUTPUT)/run
-	cd test/oats/http && TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
+	cd test/oats/http && TESTCASE_TIMEOUT=5m TESTCASE_BASE_PATH=./yaml $(GINKGO) -v -r
 
 .PHONY: oats-test
 oats-test: oats-test-sql oats-test-redis oats-test-kafka oats-test-http
@@ -399,3 +399,7 @@ protoc-gen:
 clang-format:
 	find ./bpf -type f -name "*.c" | xargs -P 0 -n 1 clang-format -i
 	find ./bpf -type f -name "*.h" | xargs -P 0 -n 1 clang-format -i
+
+.PHONY: clean-ebpf-generated-files
+clean-ebpf-generated-files:
+	find . -name "*_bpfel*" | xargs rm

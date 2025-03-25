@@ -5,9 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/cilium/ebpf/ringbuf"
-
 	"github.com/grafana/beyla/v2/pkg/config"
+	"github.com/grafana/beyla/v2/pkg/internal/ebpf/ringbuf"
 	"github.com/grafana/beyla/v2/pkg/internal/request"
 )
 
@@ -37,8 +36,8 @@ func ReadTCPRequestIntoSpan(cfg *config.EBPFTracer, record *ringbuf.Record, filt
 	b := event.Buf[:l]
 
 	if cfg.ProtocolDebug {
-		fmt.Printf("[>] %v\n", b)
-		fmt.Printf("[<] %v\n", event.Rbuf[:rl])
+		fmt.Printf("[>] %q\n", b)
+		fmt.Printf("[<] %q\n", event.Rbuf[:rl])
 	}
 
 	// Check if we have a SQL statement
